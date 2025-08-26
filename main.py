@@ -74,6 +74,7 @@ def create_memory(req: MemoryRequest):
 
 client = OpenAI(api_key=OPENAI_API_KEY)  # or use environment variable
 
+
 @app.post("/chat")
 def chat(req: ChatRequest):
     # Retrieve character persona
@@ -88,40 +89,7 @@ def chat(req: ChatRequest):
                     f"Your style: {persona.get('style', 'kind and supportive')}."
 
     # Generate AI response
-    completion = @app.post("/chat")
-def chat(req: ChatRequest):
-    # Retrieve character persona
-    character_resp = supabase.table("characters").select("*").eq("id", req.character_id).execute()
-    if not character_resp.data:
-        raise HTTPException(status_code=404, detail="Character not found")
-    character = character_resp.data[0]
-    persona = character.get("persona", {})
-
-    # Build system prompt
-    system_prompt = f"You are {persona.get('name', 'an AI girlfriend')}. " \
-                    f"Your style: {persona.get('style', 'kind and supportive')}."
-
-    # Generate AI response
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": req.message}
-        ]
-    )
-    reply = completion.choices[0].message.content
-
-    # Save conversation to memories
-    memory_data = {
-        "user_id": req.user_id,
-        "character_id": req.character_id,
-        "message": req.message,
-        "response": reply,
-        "created_at": datetime.utcnow().isoformat()
-    }
-    supabase.table("memories").insert(memory_data).execute()
-
-    return {"reply": reply}(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": system_prompt},
