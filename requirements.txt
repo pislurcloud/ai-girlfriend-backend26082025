@@ -2,14 +2,14 @@
 fastapi==0.110.0
 uvicorn[standard]==0.29.0
 
-# Supabase client (new SDK without proxy issue)
+# Supabase client (latest stable with httpx<0.26 requirement)
 supabase==2.3.6
 
 # OpenAI
 openai==1.30.1
 
 # HTTP + SSE
-httpx==0.27.0
+httpx==0.25.2
 httpx-sse==0.4.0
 
 # Async
