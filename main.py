@@ -1,115 +1,163 @@
 import os
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client
 from openai import OpenAI
-from typing import List, Dict, Any
+from datetime import datetime
 
-# Initialize FastAPI
+# Load environment variables
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Initialize clients
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+# FastAPI app
 app = FastAPI()
 
-# Supabase client
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-supabase = create_client(supabase_url, supabase_key)
+# Allow CORS for local React frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # for dev, restrict later
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# OpenAI client (no proxy arg!)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ---------------------------
+# Pydantic Models
+# ---------------------------
 
-# ----------------------------
-# Request Models
-# ----------------------------
 class CharacterCreate(BaseModel):
     name: str
-    persona: Dict[str, Any]
+    persona: dict
 
 class ChatRequest(BaseModel):
     character_id: str
-    user_id: str
     message: str
 
-# ----------------------------
-# Characters Endpoints
-# ----------------------------
+class MemoryCreate(BaseModel):
+    character_id: str
+    memory_text: str
+
+# ---------------------------
+# Endpoints
+# ---------------------------
+
 @app.post("/characters")
-def create_character(character: CharacterCreate):
+async def create_character(character: CharacterCreate):
     try:
-        data = {
-            "name": character.name,
-            "persona": character.persona
-        }
-        response = supabase.table("characters").insert(data).execute()
-        return {"status": "success", "character": response.data}
+        response = (
+            supabase.table("characters")
+            .insert({
+                "name": character.name,
+                "persona": character.persona
+            })
+            .execute()
+        )
+        return {"status": "success", "data": response.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/characters")
-def list_characters():
+async def list_characters():
     try:
         response = supabase.table("characters").select("*").execute()
-        return {"characters": response.data}
+        return {"status": "success", "data": response.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ----------------------------
-# Memories Endpoints
-# ----------------------------
-@app.get("/memories/{character_id}")
-def get_memories(character_id: str):
-    try:
-        response = supabase.table("memories").select("*").eq("character_id", character_id).execute()
-        return {"memories": response.data}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-# ----------------------------
-# Chat Endpoint
-# ----------------------------
 @app.post("/chat")
-def chat(request: ChatRequest):
+async def chat_with_character(chat: ChatRequest):
     try:
         # Fetch character
-        character_resp = supabase.table("characters").select("*").eq("id", request.character_id).execute()
-        if not character_resp.data:
+        character_res = (
+            supabase.table("characters")
+            .select("*")
+            .eq("id", chat.character_id)
+            .single()
+            .execute()
+        )
+        if not character_res.data:
             raise HTTPException(status_code=404, detail="Character not found")
-        character = character_resp.data[0]
 
-        # Fetch past memories
-        memories_resp = supabase.table("memories").select("*").eq("character_id", request.character_id).order("created_at").execute()
-        past_memories = memories_resp.data
+        character = character_res.data
 
-        # Construct system prompt from persona + memories
-        persona = character.get("persona", {})
-        persona_text = "\n".join([f"{k}: {v}" for k, v in persona.items()])
-        memory_text = "\n".join([f"{m['user_id']}: {m['message']}" for m in past_memories])
+        # Fetch memories
+        memories_res = (
+            supabase.table("memories")
+            .select("memory_text")
+            .eq("character_id", chat.character_id)
+            .execute()
+        )
+        memories = [m["memory_text"] for m in memories_res.data] if memories_res.data else []
 
+        # System prompt
         system_prompt = f"""
-        You are {character['name']}, an AI girlfriend with the following traits:
-        {persona_text}
-
-        Past conversation history:
-        {memory_text}
+        You are roleplaying as {character['name']}.
+        Persona: {character['persona']}
+        Relevant memories: {"; ".join(memories) if memories else "No memories yet."}
         """
 
-        # Call OpenAI
-        response = client.chat.completions.create(
+        # Get response from OpenAI
+        completion = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": request.message}
-            ]
+                {"role": "user", "content": chat.message}
+            ],
         )
 
-        reply = response.choices[0].message.content
+        reply = completion.choices[0].message["content"]
 
-        # Save memory
+        # Save conversation to memories for now (optional future refinement)
         supabase.table("memories").insert({
-            "character_id": request.character_id,
-            "user_id": request.user_id,
-            "message": request.message,
-            "response": reply
+            "character_id": chat.character_id,
+            "memory_text": f"User: {chat.message} | {character['name']}: {reply}",
+            "created_at": datetime.utcnow().isoformat()
         }).execute()
 
-        return {"reply": reply}
+        return {"status": "success", "reply": reply}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/memories")
+async def create_memory(memory: MemoryCreate):
+    try:
+        response = (
+            supabase.table("memories")
+            .insert({
+                "character_id": memory.character_id,
+                "memory_text": memory.memory_text,
+                "created_at": datetime.utcnow().isoformat()
+            })
+            .execute()
+        )
+        return {"status": "success", "data": response.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/memories/{character_id}")
+async def list_memories(character_id: str):
+    try:
+        response = (
+            supabase.table("memories")
+            .select("*")
+            .eq("character_id", character_id)
+            .execute()
+        )
+        return {"status": "success", "data": response.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/")
+async def root():
+    return {"message": "AI Characters API is running 🚀"}
