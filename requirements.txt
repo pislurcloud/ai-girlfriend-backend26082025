@@ -1,23 +1,6 @@
-# Core
-fastapi==0.110.0
-uvicorn[standard]==0.29.0
-
-# Supabase client (latest stable with httpx<0.26 requirement)
-supabase==2.3.6
-
-# OpenAI
-openai==1.30.1
-
-# HTTP + SSE
-httpx==0.25.2
-httpx-sse==0.4.0
-
-# Async
-anyio==4.4.0
-
-# Pydantic
-pydantic==2.8.2
-pydantic-core==2.20.1
-
-# Other utilities
+fastapi==0.111.0
+uvicorn==0.30.1
+supabase==2.4.0
+openai==1.35.7
 python-dotenv==1.0.1
+pydantic==2.7.3
