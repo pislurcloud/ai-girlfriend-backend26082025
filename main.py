@@ -1,7 +1,7 @@
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from supabase import create_client, Client
+from supabase import create_client
 from openai import OpenAI
 from typing import List, Dict, Any
 
@@ -11,7 +11,7 @@ app = FastAPI()
 # Supabase client
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-supabase: Client = create_client(supabase_url, supabase_key)
+supabase = create_client(supabase_url, supabase_key)
 
 # OpenAI client (no proxy arg!)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
