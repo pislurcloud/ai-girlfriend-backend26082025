@@ -1,144 +1,115 @@
+import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from supabase import create_client, Client
-import os
-import openai
-from typing import Optional
-from datetime import datetime
+from openai import OpenAI
+from typing import List, Dict, Any
 
-# --- Init ---
+# Initialize FastAPI
 app = FastAPI()
 
-# Supabase setup
-SUPABASE_URL: str = os.getenv("SUPABASE_URL")
-SUPABASE_KEY: str = os.getenv("SUPABASE_SERVICE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Supabase client
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+supabase: Client = create_client(supabase_url, supabase_key)
 
-# OpenAI setup
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# OpenAI client (no proxy arg!)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# --- Models ---
-class CharacterIn(BaseModel):
+# ----------------------------
+# Request Models
+# ----------------------------
+class CharacterCreate(BaseModel):
     name: str
-    persona: dict  # persona as JSON
+    persona: Dict[str, Any]
 
-class ChatIn(BaseModel):
+class ChatRequest(BaseModel):
     character_id: str
-    message: str
-    user_id: str  # required now for memories
-
-class MemoryIn(BaseModel):
     user_id: str
-    character_id: str
     message: str
-    reply: Optional[str] = None
 
-# --- Routes ---
-
-@app.get("/")
-def root():
-    return {"message": "AI Girlfriend Backend is running 🚀"}
-
-# Create a character
+# ----------------------------
+# Characters Endpoints
+# ----------------------------
 @app.post("/characters")
-def create_character(payload: CharacterIn):
+def create_character(character: CharacterCreate):
     try:
-        result = supabase.table("characters").insert({
-            "name": payload.name,
-            "persona": payload.persona,
-            "created_at": datetime.utcnow().isoformat()
-        }).execute()
-
-        if result.data:
-            return {"status": "success", "character": result.data[0]}
-        else:
-            raise HTTPException(status_code=400, detail="Insert failed")
-
+        data = {
+            "name": character.name,
+            "persona": character.persona
+        }
+        response = supabase.table("characters").insert(data).execute()
+        return {"status": "success", "character": response.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Get all characters
 @app.get("/characters")
-def get_characters():
+def list_characters():
     try:
-        result = supabase.table("characters").select("*").execute()
-        return {"characters": result.data}
+        response = supabase.table("characters").select("*").execute()
+        return {"characters": response.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Chat with a character
+# ----------------------------
+# Memories Endpoints
+# ----------------------------
+@app.get("/memories/{character_id}")
+def get_memories(character_id: str):
+    try:
+        response = supabase.table("memories").select("*").eq("character_id", character_id).execute()
+        return {"memories": response.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------
+# Chat Endpoint
+# ----------------------------
 @app.post("/chat")
-def chat(payload: ChatIn):
+def chat(request: ChatRequest):
     try:
         # Fetch character
-        char_result = supabase.table("characters").select("*").eq("id", payload.character_id).execute()
-        if not char_result.data:
+        character_resp = supabase.table("characters").select("*").eq("id", request.character_id).execute()
+        if not character_resp.data:
             raise HTTPException(status_code=404, detail="Character not found")
-        character = char_result.data[0]
+        character = character_resp.data[0]
 
+        # Fetch past memories
+        memories_resp = supabase.table("memories").select("*").eq("character_id", request.character_id).order("created_at").execute()
+        past_memories = memories_resp.data
+
+        # Construct system prompt from persona + memories
         persona = character.get("persona", {})
-        persona_text = f"This is {character['name']}, {persona.get('description', 'a virtual companion')}."
+        persona_text = "\n".join([f"{k}: {v}" for k, v in persona.items()])
+        memory_text = "\n".join([f"{m['user_id']}: {m['message']}" for m in past_memories])
+
+        system_prompt = f"""
+        You are {character['name']}, an AI girlfriend with the following traits:
+        {persona_text}
+
+        Past conversation history:
+        {memory_text}
+        """
 
         # Call OpenAI
-        response = openai.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": persona_text},
-                {"role": "user", "content": payload.message}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": request.message}
             ]
         )
 
         reply = response.choices[0].message.content
 
-        # Save to memories
+        # Save memory
         supabase.table("memories").insert({
-            "user_id": payload.user_id,
-            "character_id": payload.character_id,
-            "message": payload.message,
-            "reply": reply,
-            "created_at": datetime.utcnow().isoformat()
+            "character_id": request.character_id,
+            "user_id": request.user_id,
+            "message": request.message,
+            "response": reply
         }).execute()
 
-        return {
-            "character": character["name"],
-            "user_message": payload.message,
-            "reply": reply
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Save memory manually
-@app.post("/memories")
-def save_memory(payload: MemoryIn):
-    try:
-        result = supabase.table("memories").insert({
-            "user_id": payload.user_id,
-            "character_id": payload.character_id,
-            "message": payload.message,
-            "reply": payload.reply,
-            "created_at": datetime.utcnow().isoformat()
-        }).execute()
-
-        if result.data:
-            return {"status": "success", "memory": result.data[0]}
-        else:
-            raise HTTPException(status_code=400, detail="Insert failed")
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Get chat history for a user + character
-@app.get("/memories/{user_id}/{character_id}")
-def get_memories(user_id: str, character_id: str):
-    try:
-        result = supabase.table("memories") \
-            .select("*") \
-            .eq("user_id", user_id) \
-            .eq("character_id", character_id) \
-            .order("created_at", desc=False) \
-            .execute()
-
-        return {"memories": result.data}
+        return {"reply": reply}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
