@@ -1,7 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from supabase import create_client, Client
-import openai
+#import openai
+from openai import OpenAI
 import os
 
 # Load env vars
@@ -69,6 +70,10 @@ def create_memory(req: MemoryRequest):
         raise HTTPException(status_code=500, detail=str(error))
     return {"memory": data.data[0]}
 
+
+
+client = OpenAI(api_key=openai.api_key)  # or use environment variable
+
 @app.post("/chat")
 def chat(req: ChatRequest):
     # Retrieve character persona
@@ -81,7 +86,8 @@ def chat(req: ChatRequest):
     system_prompt = f"You are {persona.get('name', 'an AI girlfriend')}. " \
                     f"Your style: {persona.get('style', 'kind and supportive')}."
 
-    completion = openai.ChatCompletion.create(
+    # Create chat completion using new SDK
+    completion = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": system_prompt},
@@ -89,5 +95,5 @@ def chat(req: ChatRequest):
         ]
     )
 
-    reply = completion.choices[0].message["content"]
+    reply = completion.choices[0].message.content
     return {"reply": reply}
