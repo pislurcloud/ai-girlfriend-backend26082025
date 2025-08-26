@@ -2,7 +2,7 @@ import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from supabase import create_client
+from postgrest import APIClient
 from openai import OpenAI
 from datetime import datetime
 
@@ -12,7 +12,11 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Initialize clients
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase = APIClient(f"{SUPABASE_URL}/rest/v1", headers={
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json"
+})
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # FastAPI app
@@ -113,7 +117,7 @@ async def chat_with_character(chat: ChatRequest):
             ],
         )
 
-        reply = completion.choices[0].message["content"]
+        reply = completion.choices[0].message.content
 
         # Save conversation to memories for now (optional future refinement)
         supabase.table("memories").insert({
