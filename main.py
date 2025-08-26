@@ -77,23 +77,34 @@ client = OpenAI(api_key=OPENAI_API_KEY)  # or use environment variable
 @app.post("/chat")
 def chat(req: ChatRequest):
     # Retrieve character persona
-    character = supabase.table("characters").select("*").eq("id", req.character_id).execute()
-    if not character.data:
+    character_resp = supabase.table("characters").select("*").eq("id", req.character_id).execute()
+    if not character_resp.data:
         raise HTTPException(status_code=404, detail="Character not found")
-    persona = character.data[0]["persona"]
+    character = character_resp.data[0]
+    persona = character.get("persona", {})
 
-    # Simple context prompt
+    # Build system prompt
     system_prompt = f"You are {persona.get('name', 'an AI girlfriend')}. " \
                     f"Your style: {persona.get('style', 'kind and supportive')}."
 
-    # Create chat completion using new SDK
-    completion = client.chat.completions.create(
+    # Generate AI response
+    completion = openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": req.message}
         ]
     )
-
     reply = completion.choices[0].message.content
+
+    # Save conversation to memories
+    memory_data = {
+        "user_id": req.user_id,
+        "character_id": req.character_id,
+        "message": req.message,
+        "response": reply,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    supabase.table("memories").insert(memory_data).execute()
+
     return {"reply": reply}
