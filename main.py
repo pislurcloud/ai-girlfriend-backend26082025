@@ -1,93 +1,92 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from supabase import create_client, Client
-import openai
+from openai import OpenAI
 import os
 
-# Load env vars
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-
-if not all([OPENAI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY]):
-    raise RuntimeError("Missing one or more environment variables")
-
-# Init clients
-openai.api_key = OPENAI_API_KEY
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
+# --- Initialize FastAPI ---
 app = FastAPI()
 
-# --------- Models ---------
+# --- Environment Variables ---
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not OPENAI_API_KEY:
+    raise Exception("Missing environment variables. Please set SUPABASE_URL, SUPABASE_SERVICE_KEY, and OPENAI_API_KEY.")
+
+# --- Clients ---
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+# --- Request Models ---
+class CharacterCreate(BaseModel):
+    name: str
+    persona: dict  # expects JSONB in Supabase
+
 class ChatRequest(BaseModel):
-    user_id: str
     character_id: str
     message: str
 
-class CharacterRequest(BaseModel):
-    name: str
-    persona: dict
-
-class MemoryRequest(BaseModel):
-    user_id: str
-    character_id: str
-    content: str
-
-# --------- Endpoints ---------
-
-@app.get("/")
-def root():
-    return {"status": "ok", "message": "AI Girlfriend backend running"}
+# --- Characters Endpoints ---
+@app.get("/characters")
+async def list_characters():
+    """Fetch all characters from Supabase"""
+    try:
+        response = supabase.table("characters").select("*").execute()
+        return {"characters": response.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/characters")
-def create_character(req: CharacterRequest):
-    data, error = supabase.table("characters").insert({
-        "name": req.name,
-        "persona": req.persona
-    }).execute()
-    if error:
-        raise HTTPException(status_code=500, detail=str(error))
-    return {"character": data.data[0]}
+async def create_character(character: CharacterCreate):
+    """Create a new character"""
+    try:
+        response = supabase.table("characters").insert({
+            "name": character.name,
+            "persona": character.persona
+        }).execute()
+        return {"character": response.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/memories")
-def create_memory(req: MemoryRequest):
-    # Generate embedding
-    emb = openai.embeddings.create(
-        model="text-embedding-3-small",
-        input=req.content
-    )
-    vector = emb.data[0].embedding
-
-    data, error = supabase.table("memories").insert({
-        "user_id": req.user_id,
-        "character_id": req.character_id,
-        "content": req.content,
-        "embedding": vector
-    }).execute()
-
-    if error:
-        raise HTTPException(status_code=500, detail=str(error))
-    return {"memory": data.data[0]}
-
+# --- Chat Endpoint ---
 @app.post("/chat")
-def chat(req: ChatRequest):
-    # Retrieve character persona
-    character = supabase.table("characters").select("*").eq("id", req.character_id).execute()
-    if not character.data:
-        raise HTTPException(status_code=404, detail="Character not found")
-    persona = character.data[0]["persona"]
+async def chat(request: ChatRequest):
+    """Send a message to a character and get an AI response"""
+    try:
+        # Fetch character from Supabase
+        response = supabase.table("characters").select("*").eq("id", request.character_id).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Character not found")
 
-    # Simple context prompt
-    system_prompt = f"You are {persona.get('name', 'an AI girlfriend')}. " \
-                    f"Your style: {persona.get('style', 'kind and supportive')}."
+        character = response.data[0]
+        name = character["name"]
+        persona = character.get("persona", {})
 
-    completion = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": req.message}
-        ]
-    )
+        # Build system prompt
+        persona_text = f"You are {name}, an AI companion."
+        if "description" in persona:
+            persona_text += f" {persona['description']}"
+        if "style" in persona:
+            persona_text += f" Your communication style is {persona['style']}."
+        if "likes" in persona:
+            persona_text += f" You enjoy {', '.join(persona['likes'])}."
 
-    reply = completion.choices[0].message["content"]
-    return {"reply": reply}
+        # Call OpenAI
+        chat_response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": persona_text},
+                {"role": "user", "content": request.message}
+            ],
+            max_tokens=200
+        )
+
+        reply = chat_response.choices[0].message.content
+        return {"reply": reply}
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
