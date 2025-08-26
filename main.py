@@ -14,7 +14,7 @@ if not all([OPENAI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY]):
     raise RuntimeError("Missing one or more environment variables")
 
 # Init clients
-openai.api_key = OPENAI_API_KEY
+#openai.api_key = OPENAI_API_KEY
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 app = FastAPI()
@@ -72,7 +72,7 @@ def create_memory(req: MemoryRequest):
 
 
 
-client = OpenAI(api_key=openai.api_key)  # or use environment variable
+client = OpenAI(api_key=OPENAI_API_KEY)  # or use environment variable
 
 @app.post("/chat")
 def chat(req: ChatRequest):
