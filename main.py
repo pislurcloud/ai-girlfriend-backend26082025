@@ -44,6 +44,13 @@ class MemoryRequest(BaseModel):
     character_id: str
     content: str
 
+class UserRequest(BaseModel):
+    username: str
+
+class UserResponse(BaseModel):
+    id: str
+    username: str
+
 # --------- Endpoints ---------
 
 @app.get("/")
@@ -90,6 +97,26 @@ def create_memory(req: MemoryRequest):
         raise HTTPException(status_code=500, detail=str(error))
     return {"memory": data.data[0]}
 
+@app.post("/users", response_model=UserResponse)
+def create_user(req: UserRequest):
+    # Check if username already exists
+    existing = supabase.table("users").select("*").eq("username", req.username).execute()
+    if existing.data:
+        raise HTTPException(status_code=400, detail="Username already exists")
+
+    # Insert new user
+    data, error = supabase.table("users").insert({"username": req.username}).execute()
+    if error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+    return {"id": data.data[0]["id"], "username": data.data[0]["username"]}
+
+@app.get("/users")
+def get_user(username: str):
+    result = supabase.table("users").select("*").eq("username", username).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"id": result.data[0]["id"], "username": result.data[0]["username"]}
 
 
 client = OpenAI(api_key=OPENAI_API_KEY)  # or use environment variable
