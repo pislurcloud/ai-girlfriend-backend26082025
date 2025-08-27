@@ -52,13 +52,12 @@ def create_character(req: CharacterRequest):
     return {"character": data.data[0]}
 
 @app.get("/characters")
-def list_characters():
-    data, error = supabase.table("characters").select("*").execute()
-    if error:
-        raise HTTPException(status_code=500, detail=str(error))
-    if not data.data:
-        return {"characters": []}
-    return {"characters": data.data}
+def get_characters():
+    result = supabase.table("characters").select("*").execute()
+    if result.error:
+        raise HTTPException(status_code=500, detail=str(result.error))
+    return {"characters": result.data}
+
 
 @app.post("/memories")
 def create_memory(req: MemoryRequest):
