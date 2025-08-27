@@ -51,6 +51,15 @@ def create_character(req: CharacterRequest):
         raise HTTPException(status_code=500, detail=str(error))
     return {"character": data.data[0]}
 
+@app.get("/characters")
+def list_characters():
+    data, error = supabase.table("characters").select("*").execute()
+    if error:
+        raise HTTPException(status_code=500, detail=str(error))
+    if not data.data:
+        return {"characters": []}
+    return {"characters": data.data}
+
 @app.post("/memories")
 def create_memory(req: MemoryRequest):
     # Generate embedding
