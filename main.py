@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from supabase import create_client, Client
+from datetime import datetime
 #import openai
 from openai import OpenAI
 import os
