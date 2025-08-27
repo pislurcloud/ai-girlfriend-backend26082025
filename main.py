@@ -55,7 +55,8 @@ def create_character(req: CharacterRequest):
 def get_characters():
     try:
         result = supabase.table("characters").select("*").execute()
-        return {"characters": result.data}
+        print("DEBUG result:", result)  # <--- add this
+        return {"characters": result.data or []}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
