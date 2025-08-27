@@ -53,10 +53,11 @@ def create_character(req: CharacterRequest):
 
 @app.get("/characters")
 def get_characters():
-    result = supabase.table("characters").select("*").execute()
-    if result.error:
-        raise HTTPException(status_code=500, detail=str(result.error))
-    return {"characters": result.data}
+    try:
+        result = supabase.table("characters").select("*").execute()
+        return {"characters": result.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/memories")
