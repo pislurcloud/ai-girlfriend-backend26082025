@@ -58,6 +58,7 @@ class ChatRequest(BaseModel):
     message: str
 
 class CharacterRequest(BaseModel):
+    user_id: str
     name: str
     persona: Dict[str, Any]
 
@@ -200,6 +201,7 @@ def read_users_me():
     return {"message": "Auth disabled for now"}
 
 # --------- Character Management with User Association ---------
+@app.post("/characters")
 def create_character(req: CharacterRequest):
     try:
         result = supabase.table("characters").insert({
