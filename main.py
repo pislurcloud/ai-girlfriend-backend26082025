@@ -55,6 +55,15 @@ class UserResponse(BaseModel):
     id: str
     username: str
 
+class UserRegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+
+class UserLoginRequest(BaseModel):
+    username: str
+    password: str
+
 # --------- Endpoints ---------
 
 @app.get("/")
