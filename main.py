@@ -54,6 +54,8 @@ class UserRequest(BaseModel):
 class UserResponse(BaseModel):
     id: str
     username: str
+    email: Optional[str] = None
+    token: Optional[str] = None
 
 class UserRegisterRequest(BaseModel):
     username: str
