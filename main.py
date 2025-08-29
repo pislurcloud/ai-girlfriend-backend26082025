@@ -177,19 +177,8 @@ def get_user(username: str):
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/users/me")
-def get_current_user_info(current_user: str = Depends(get_current_user)):
-    """Get current authenticated user info"""
-    try:
-        result = supabase.table("users").select("id, username, email").eq("id", current_user).execute()
-        if not result.data:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        return result.data[0]
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+def read_users_me():
+    return {"message": "Auth disabled for now"}
 
 # --------- Character Management with User Association ---------
 def create_character(req: CharacterRequest):
