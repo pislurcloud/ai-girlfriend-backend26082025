@@ -3,3 +3,6 @@ uvicorn[standard]
 openai
 supabase
 psycopg2-binary
+pyjwt
+bcrypt
+python-multipart
