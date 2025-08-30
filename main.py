@@ -89,18 +89,36 @@ async def generate_and_store_character_image(character_data: Dict[str, Any], use
         filename = f"characters/{user_id}/{character_name}_{uuid.uuid4().hex[:8]}.png"
         
         # Upload to Supabase Storage
-        result = supabase.storage.from_("character-images").upload(
-            filename, 
-            img_response.content,
-            {"content-type": "image/png"}
-        )
-        
-        if result.data:
-            # Get public URL
-            public_url = supabase.storage.from_("character-images").get_public_url(filename)
-            return public_url.data.get('publicUrl') if public_url.data else None
-        else:
-            print(f"Upload failed: {result}")
+        try:
+            result = supabase.storage.from_("character-images").upload(
+                filename, 
+                img_response.content,
+                {"content-type": "image/png"}
+            )
+            print(f"Upload result type: {type(result)}")
+            print(f"Upload result: {result}")
+            
+            # Check if upload was successful (different response structure)
+            if hasattr(result, 'path') or (hasattr(result, 'data') and result.data):
+                # Get public URL
+                public_url_response = supabase.storage.from_("character-images").get_public_url(filename)
+                print(f"Public URL response: {public_url_response}")
+                
+                # Handle different response structures
+                if hasattr(public_url_response, 'data'):
+                    return public_url_response.data.get('publicUrl')
+                elif hasattr(public_url_response, 'publicUrl'):
+                    return public_url_response.publicUrl
+                elif isinstance(public_url_response, str):
+                    return public_url_response
+                else:
+                    print(f"Unexpected public URL response format: {type(public_url_response)}")
+                    return None
+            else:
+                print(f"Upload failed: {result}")
+                return None
+        except Exception as upload_error:
+            print(f"Upload exception: {str(upload_error)}")
             return None
             
     except Exception as e:
@@ -130,16 +148,32 @@ async def generate_chat_image(prompt: str, user_id: str, character_id: str) -> O
         filename = f"chat-images/{user_id}/{character_id}/{uuid.uuid4().hex}.png"
         
         # Upload to Supabase Storage
-        result = supabase.storage.from_("character-images").upload(
-            filename, 
-            img_response.content,
-            {"content-type": "image/png"}
-        )
-        
-        if result.data:
-            public_url = supabase.storage.from_("character-images").get_public_url(filename)
-            return public_url.data.get('publicUrl') if public_url.data else None
-        else:
+        try:
+            result = supabase.storage.from_("character-images").upload(
+                filename, 
+                img_response.content,
+                {"content-type": "image/png"}
+            )
+            print(f"Chat image upload result: {result}")
+            
+            # Check if upload was successful
+            if hasattr(result, 'path') or (hasattr(result, 'data') and result.data):
+                # Get public URL
+                public_url_response = supabase.storage.from_("character-images").get_public_url(filename)
+                
+                # Handle different response structures
+                if hasattr(public_url_response, 'data'):
+                    return public_url_response.data.get('publicUrl')
+                elif hasattr(public_url_response, 'publicUrl'):
+                    return public_url_response.publicUrl
+                elif isinstance(public_url_response, str):
+                    return public_url_response
+                else:
+                    return None
+            else:
+                return None
+        except Exception as upload_error:
+            print(f"Chat image upload exception: {str(upload_error)}")
             return None
             
     except Exception as e:
