@@ -127,14 +127,18 @@ async def generate_and_store_character_image(character_data: Dict[str, Any], use
         return None
 
 async def generate_chat_image(prompt: str, user_id: str, character_id: str) -> Optional[str]:
-    """Generate image for chat based on user request"""
+    """Generate image for chat based on user request with enhanced realism"""
     try:
+        # Enhance prompt for better realism based on content type
+        enhanced_prompt = enhance_image_prompt(prompt)
+        print(f"Enhanced chat image prompt: {enhanced_prompt}")
+        
         # Generate image with DALL-E 3
         response = openai_client.images.generate(
             model="dall-e-3",
-            prompt=f"{prompt}, high quality, detailed, beautiful",
+            prompt=enhanced_prompt,
             size="1024x1024",
-            quality="standard",
+            quality="hd",  # Use HD quality for better results
             n=1
         )
         
@@ -180,6 +184,27 @@ async def generate_chat_image(prompt: str, user_id: str, character_id: str) -> O
     except Exception as e:
         print(f"Error generating chat image: {str(e)}")
         return None
+
+def enhance_image_prompt(user_prompt: str) -> str:
+    """Enhance user prompts for better DALL-E 3 realism"""
+    prompt_lower = user_prompt.lower()
+    
+    # Detect content type and add appropriate enhancement
+    if any(word in prompt_lower for word in ['person', 'people', 'man', 'woman', 'human', 'face', 'portrait']):
+        return f"Ultra-realistic professional photograph of {user_prompt}, shot with Canon EOS R5, 85mm lens, natural studio lighting, photojournalism style, high detail, 4K quality"
+    
+    elif any(word in prompt_lower for word in ['food', 'meal', 'dish', 'cooking', 'restaurant', 'kitchen']):
+        return f"Professional food photography of {user_prompt}, appetizing, restaurant quality, natural lighting, macro lens, food styling, high resolution"
+    
+    elif any(word in prompt_lower for word in ['place', 'location', 'city', 'landscape', 'building', 'room', 'house']):
+        return f"High-resolution travel photography of {user_prompt}, professional landscape photography, natural lighting, wide angle lens, realistic, detailed"
+    
+    elif any(word in prompt_lower for word in ['animal', 'dog', 'cat', 'bird', 'wildlife']):
+        return f"Professional wildlife photography of {user_prompt}, National Geographic style, natural habitat, high detail, realistic"
+    
+    else:
+        # General objects or abstract concepts
+        return f"High-quality realistic photograph of {user_prompt}, professional photography, natural lighting, detailed, 4K resolution"
 
 app = FastAPI()
 
@@ -532,7 +557,14 @@ async def chat(req: ChatRequest):
         - Stay in character with your personality style
         - Keep responses reasonably concise but meaningful
         - Be supportive and understanding
-        - If the user asks you to generate, create, show, or make an image, respond with "I'll create that image for you!" and include [GENERATE_IMAGE: detailed description] at the end of your message"""
+        - If the user asks you to generate, create, show, or make an image, respond with "I'll create that image for you!" and include [GENERATE_IMAGE: detailed description] at the end of your message
+        - For image prompts, be very specific about style:
+          * For people: "Ultra-realistic photograph, professional photography, natural lighting"
+          * For food: "Professional food photography, appetizing, restaurant quality"
+          * For places: "High-resolution photograph, travel photography, realistic"
+          * For objects: "Product photography, high-quality, realistic lighting"
+          * Avoid words like "painting", "artwork", "illustration", "digital art"
+        """
 
         # Get recent conversation context (last 10 messages)
         try:
