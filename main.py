@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -201,6 +201,10 @@ class GenerateImageRequest(BaseModel):
     character_id: str
     prompt: str
 
+# FIXED: Added proper request model for avatar generation
+class GenerateAvatarRequest(BaseModel):
+    user_id: str
+
 # --------- Endpoints ---------
 
 @app.get("/")
@@ -341,6 +345,7 @@ async def create_enhanced_character(req: EnhancedCharacterRequest):
                 req.user_id
             )
             character_data["avatar_url"] = avatar_url
+            print(f"Generated avatar URL: {avatar_url}")
         
         # Insert character into database
         result = supabase.table("characters").insert(character_data).execute()
@@ -374,27 +379,35 @@ def create_character(req: CharacterRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
+# FIXED: Proper request body approach for avatar generation
 @app.post("/characters/{character_id}/generate-avatar")
-async def generate_character_avatar(character_id: str, user_id: str):
-    """Generate avatar for existing character"""
+async def generate_character_avatar(character_id: str, req: GenerateAvatarRequest):
+    """Generate avatar for existing character using request body"""
     try:
+        print(f"Generating avatar for character {character_id}, user {req.user_id}")
+        
         # Get character data
-        result = supabase.table("characters").select("*").eq("id", character_id).eq("user_id", user_id).execute()
+        result = supabase.table("characters").select("*").eq("id", character_id).eq("user_id", req.user_id).execute()
         if not result.data:
             raise HTTPException(status_code=404, detail="Character not found or not owned by user")
         
         character = result.data[0]
+        print(f"Found character: {character.get('name')}")
         
         # Generate avatar
-        avatar_url = await generate_and_store_character_image(character, user_id)
+        avatar_url = await generate_and_store_character_image(character, req.user_id)
         
         if avatar_url:
+            print(f"Generated avatar URL: {avatar_url}")
             # Update character with avatar URL
             update_result = supabase.table("characters").update({
                 "avatar_url": avatar_url
             }).eq("id", character_id).execute()
             
-            return {"avatar_url": avatar_url, "character": update_result.data[0] if update_result.data else character}
+            if update_result.data:
+                return {"avatar_url": avatar_url, "character": update_result.data[0]}
+            else:
+                return {"avatar_url": avatar_url, "character": character}
         else:
             raise HTTPException(status_code=500, detail="Failed to generate avatar")
     
@@ -460,6 +473,8 @@ def fetch_memories(req: FetchMemoriesRequest):
 @app.post("/chat")
 async def chat(req: ChatRequest):
     try:
+        print(f"Chat request: user_id={req.user_id}, character_id={req.character_id}, message={req.message[:50]}...")
+        
         # Retrieve character persona
         character_result = supabase.table("characters").select("*").eq("id", req.character_id).execute()
         if not character_result.data:
@@ -520,27 +535,35 @@ async def chat(req: ChatRequest):
                 temperature=0.8
             )
             reply = completion.choices[0].message.content
+            print(f"AI replied: {reply[:100]}...")
         
         except Exception as e:
             print(f"OpenAI API error: {str(e)}")
             reply = "I'm sorry, I'm having trouble thinking right now. Could you try asking me again?"
 
-        # Check if AI wants to generate an image
+        # FIXED: Better image generation detection and handling
         generated_image_url = None
         if "[GENERATE_IMAGE:" in reply:
             try:
+                print("Detected image generation request in AI response")
                 # Extract image prompt
                 start = reply.find("[GENERATE_IMAGE:") + len("[GENERATE_IMAGE:")
                 end = reply.find("]", start)
                 if end > start:
                     image_prompt = reply[start:end].strip()
+                    print(f"Extracted image prompt: {image_prompt}")
+                    
                     # Remove the generate image instruction from the reply
                     reply = reply.replace(f"[GENERATE_IMAGE:{image_prompt}]", "").strip()
                     
                     # Generate the image
+                    print("Starting image generation...")
                     generated_image_url = await generate_chat_image(image_prompt, req.user_id, req.character_id)
+                    print(f"Generated chat image URL: {generated_image_url}")
+                    
             except Exception as e:
                 print(f"Error generating chat image: {str(e)}")
+                # Don't fail the entire chat if image generation fails
 
         # Save conversation to memories
         try:
@@ -552,7 +575,8 @@ async def chat(req: ChatRequest):
                 "image_url": generated_image_url,
                 "created_at": datetime.utcnow().isoformat()
             }
-            supabase.table("memories").insert(memory_data).execute()
+            memory_result = supabase.table("memories").insert(memory_data).execute()
+            print(f"Saved conversation to memories: {memory_result.data is not None}")
         except Exception as e:
             print(f"Warning: Could not save conversation: {str(e)}")
 
