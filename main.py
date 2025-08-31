@@ -30,8 +30,8 @@ if not all([OPENAI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY]):
     raise RuntimeError("Missing one or more environment variables")
 
 # Enhanced logging setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+#logging.basicConfig(level=logging.INFO)
+#logger = logging.getLogger(__name__)
 
 
 # Init clients
