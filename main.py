@@ -1025,7 +1025,14 @@ async def get_user_stats(user_id: str):
         raise HTTPException(status_code=500, detail="Failed to get user stats")
 
 
- --------- Enhanced Voice Models with Validation ---------
+# Enhanced Voice-Related Models and Endpoints
+# Replace the voice-related sections in your main.py with this improved version
+
+# Enhanced logging setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# --------- Enhanced Voice Models with Validation ---------
 
 class VoiceRequest(BaseModel):
     user_id: str
@@ -2280,7 +2287,7 @@ async def get_voice_system_info():
                 }
                 
         except Exception as e:
-            return                     
+            return
 
 if __name__ == "__main__":
     import uvicorn
