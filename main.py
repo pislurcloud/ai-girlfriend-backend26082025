@@ -2203,6 +2203,13 @@ async def check_browser_voice_support():
 
 # --------- Installation and Dependency Check ---------
 
+from fastapi import UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+import os, io, logging
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
 @app.get("/voice/system-info")
 async def get_voice_system_info():
     """Get information about voice processing capabilities"""
@@ -2227,7 +2234,7 @@ async def get_voice_system_info():
         }
         system_info["capabilities"]["audio_conversion"] = False
     
-    # Check ffmpeg (indirectly through pydub)
+    # Check ffmpeg
     try:
         from pydub.utils import which
         ffmpeg_path = which("ffmpeg")
@@ -2243,8 +2250,7 @@ async def get_voice_system_info():
     
     # Check OpenAI client
     try:
-        # Test if we can create a client (doesn't make actual API call)
-        test_client = OpenAI(api_key="test")
+        test_client = OpenAI(api_key="test")  # test client, no API call
         system_info["dependencies"]["openai"] = {
             "available": True,
             "client_created": True
@@ -2257,37 +2263,64 @@ async def get_voice_system_info():
         }
         system_info["capabilities"]["speech_services"] = False
     
-    return system_info {
-                "error": "Invalid base64 audio data",
-                "details": str(e),
+    return JSONResponse(content=system_info)
+
+
+@app.post("/voice/process")
+async def process_voice_file(file: UploadFile = File(...), format: str = "wav"):
+    """Process uploaded audio file (convert, validate, return metadata)"""
+    temp_files = []
+    try:
+        audio_bytes = await file.read()
+        audio_size = len(audio_bytes)
+
+        if audio_size == 0:
+            return {
+                "error": "Invalid audio data",
                 "success": False
             }
-        
-        # Try to process the audio file
-        try:
-            processed_path = process_audio_file(audio_bytes, req.format)
-            temp_files.append(processed_path)
-            
-            if os.path.exists(processed_path):
-                processed_size = os.path.getsize(processed_path)
-                logger.info(f"Audio processed successfully - Size: {processed_size} bytes")
-                
-                return {
-                    "success": True,
-                    "original_size_bytes": audio_size,
-                    "processed_size_bytes": processed_size,
-                    "format": req.format,
-                    "processing_successful": True,
-                    "message": "Audio processing completed successfully"
-                }
-            else:
-                return {
-                    "error": "Processed file not found",
-                    "success": False
-                }
-                
-        except Exception as e:
-            return
+
+        # Save uploaded file
+        input_path = f"/tmp/{file.filename}"
+        with open(input_path, "wb") as f:
+            f.write(audio_bytes)
+        temp_files.append(input_path)
+
+        # Process audio (you must have `process_audio_file` defined)
+        processed_path = process_audio_file(input_path, format)
+        temp_files.append(processed_path)
+
+        if os.path.exists(processed_path):
+            processed_size = os.path.getsize(processed_path)
+            logger.info(f"Audio processed successfully - Size: {processed_size} bytes")
+
+            return {
+                "success": True,
+                "original_size_bytes": audio_size,
+                "processed_size_bytes": processed_size,
+                "format": format,
+                "processing_successful": True,
+                "message": "Audio processing completed successfully"
+            }
+        else:
+            return {
+                "error": "Processed file not found",
+                "success": False
+            }
+
+    except Exception as e:
+        return {
+            "error": str(e),
+            "success": False
+        }
+    finally:
+        # cleanup
+        for path in temp_files:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as cleanup_err:
+                logger.warning(f"Cleanup failed for {path}: {cleanup_err}")
 
 if __name__ == "__main__":
     import uvicorn
