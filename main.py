@@ -12,6 +12,14 @@ import uuid
 import requests
 from typing import Optional, List, Dict, Any
 
+# Add these to your main.py for Phase 3 Voice Implementation
+
+import base64
+import io
+from pydub import AudioSegment
+from pydub.playback import play
+import tempfile
+
 # Load env vars
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -1010,7 +1018,429 @@ async def get_user_stats(user_id: str):
     except Exception as e:
         print(f"Stats error: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get user stats")
+
+# --------- Voice-Related Models ---------
+
+class VoiceRequest(BaseModel):
+    user_id: str
+    character_id: str
+    audio_data: str  # Base64 encoded audio
+    format: str = "webm"  # Audio format from browser
+
+class TextToSpeechRequest(BaseModel):
+    text: str
+    character_id: str
+    voice_style: Optional[str] = None
+
+class VoiceSettingsRequest(BaseModel):
+    character_id: str
+    user_id: str
+    voice_config: Dict[str, Any]
+
+# --------- Voice Configuration Functions ---------
+
+def get_character_voice_config(character_data: Dict[str, Any]) -> Dict[str, str]:
+    """Generate voice configuration based on character persona and appearance"""
+    persona = character_data.get('persona', {})
+    appearance = character_data.get('appearance', {})
+    
+    # Map character traits to OpenAI voice options
+    # Available voices: alloy, echo, fable, onyx, nova, shimmer
+    
+    gender = appearance.get('gender', 'person').lower()
+    style = persona.get('style', '').lower()
+    age = appearance.get('age', '25')
+    
+    # Voice selection logic
+    if 'woman' in gender or 'female' in gender:
+        if 'elegant' in style or 'formal' in style:
+            voice = "nova"  # Professional female voice
+        elif 'playful' in style or 'energetic' in style:
+            voice = "shimmer"  # Bright, energetic female voice
+        else:
+            voice = "alloy"  # Neutral female voice
+    elif 'man' in gender or 'male' in gender:
+        if 'deep' in style or 'serious' in style:
+            voice = "onyx"  # Deep male voice
+        elif 'calm' in style or 'wise' in style:
+            voice = "echo"  # Calm male voice
+        else:
+            voice = "fable"  # Neutral male voice
+    else:
+        # Non-binary or unspecified
+        voice = "alloy"  # Most neutral option
+    
+    # Speed based on personality
+    if 'energetic' in style or 'excited' in style:
+        speed = 1.1
+    elif 'calm' in style or 'relaxed' in style:
+        speed = 0.9
+    else:
+        speed = 1.0
+    
+    return {
+        "voice": voice,
+        "speed": speed,
+        "model": "tts-1-hd"  # High quality model
+    }
+
+# --------- Voice Processing Endpoints ---------
+
+@app.post("/voice/speech-to-text")
+async def speech_to_text(req: VoiceRequest):
+    """Convert user speech to text using OpenAI Whisper"""
+    try:
+        print(f"Processing speech-to-text for user {req.user_id}")
         
+        # Decode base64 audio data
+        audio_bytes = base64.b64decode(req.audio_data)
+        
+        # Create temporary file for audio processing
+        with tempfile.NamedTemporaryFile(suffix=f".{req.format}", delete=False) as temp_file:
+            temp_file.write(audio_bytes)
+            temp_file_path = temp_file.name
+        
+        try:
+            # Convert to compatible format if needed
+            if req.format.lower() in ['webm', 'ogg']:
+                # Convert webm/ogg to wav for better compatibility
+                audio = AudioSegment.from_file(temp_file_path)
+                wav_path = temp_file_path.replace(f".{req.format}", ".wav")
+                audio.export(wav_path, format="wav")
+                audio_file_path = wav_path
+            else:
+                audio_file_path = temp_file_path
+            
+            # Transcribe using OpenAI Whisper
+            with open(audio_file_path, "rb") as audio_file:
+                transcript = openai_client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    language="en"  # Auto-detect or specify language
+                )
+            
+            transcribed_text = transcript.text
+            print(f"Transcribed text: {transcribed_text}")
+            
+            # Clean up temporary files
+            os.unlink(temp_file_path)
+            if audio_file_path != temp_file_path:
+                os.unlink(audio_file_path)
+            
+            return {
+                "transcribed_text": transcribed_text,
+                "confidence": "high"  # Whisper doesn't provide confidence scores
+            }
+            
+        except Exception as e:
+            # Clean up on error
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+            raise e
+    
+    except Exception as e:
+        print(f"Speech-to-text error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Speech recognition failed: {str(e)}")
+
+@app.post("/voice/text-to-speech")
+async def text_to_speech(req: TextToSpeechRequest):
+    """Convert AI response to speech with character-specific voice"""
+    try:
+        print(f"Generating speech for character {req.character_id}")
+        
+        # Get character data for voice configuration
+        character_result = supabase.table("characters").select("*").eq("id", req.character_id).execute()
+        if not character_result.data:
+            raise HTTPException(status_code=404, detail="Character not found")
+        
+        character = character_result.data[0]
+        voice_config = get_character_voice_config(character)
+        
+        # Override voice if specified
+        if req.voice_style:
+            voice_config["voice"] = req.voice_style
+        
+        print(f"Using voice config: {voice_config}")
+        
+        # Generate speech using OpenAI TTS
+        response = openai_client.audio.speech.create(
+            model=voice_config["model"],
+            voice=voice_config["voice"],
+            input=req.text,
+            speed=voice_config["speed"]
+        )
+        
+        # Convert response to base64 for frontend
+        audio_data = base64.b64encode(response.content).decode('utf-8')
+        
+        return {
+            "audio_data": audio_data,
+            "format": "mp3",
+            "voice_used": voice_config["voice"],
+            "text": req.text
+        }
+    
+    except Exception as e:
+        print(f"Text-to-speech error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Speech generation failed: {str(e)}")
+
+@app.put("/characters/{character_id}/voice-settings")
+async def update_voice_settings(character_id: str, req: VoiceSettingsRequest):
+    """Update voice settings for a character"""
+    try:
+        # Verify character ownership
+        result = supabase.table("characters").select("*").eq("id", character_id).eq("user_id", req.user_id).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Character not found or not owned by user")
+        
+        current_character = result.data[0]
+        
+        # Update voice configuration
+        current_persona = current_character.get("persona", {})
+        current_persona["voice_config"] = req.voice_config
+        
+        update_result = supabase.table("characters").update({
+            "persona": current_persona
+        }).eq("id", character_id).execute()
+        
+        if not update_result.data:
+            raise HTTPException(status_code=500, detail="Failed to update voice settings")
+        
+        return {"character": update_result.data[0], "message": "Voice settings updated"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Voice settings update error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Voice settings update failed")
+
+@app.get("/voice/available-voices")
+async def get_available_voices():
+    """Get list of available voices with descriptions"""
+    return {
+        "voices": [
+            {
+                "id": "alloy", 
+                "name": "Alloy", 
+                "description": "Neutral, versatile voice",
+                "gender": "neutral",
+                "suitable_for": ["general", "professional", "friendly"]
+            },
+            {
+                "id": "echo", 
+                "name": "Echo", 
+                "description": "Calm, wise male voice",
+                "gender": "male",
+                "suitable_for": ["mentor", "calm", "thoughtful"]
+            },
+            {
+                "id": "fable", 
+                "name": "Fable", 
+                "description": "Warm male voice",
+                "gender": "male",
+                "suitable_for": ["storytelling", "friendly", "approachable"]
+            },
+            {
+                "id": "onyx", 
+                "name": "Onyx", 
+                "description": "Deep, authoritative male voice",
+                "gender": "male",
+                "suitable_for": ["serious", "professional", "confident"]
+            },
+            {
+                "id": "nova", 
+                "name": "Nova", 
+                "description": "Professional female voice",
+                "gender": "female",
+                "suitable_for": ["professional", "elegant", "sophisticated"]
+            },
+            {
+                "id": "shimmer", 
+                "name": "Shimmer", 
+                "description": "Bright, energetic female voice",
+                "gender": "female",
+                "suitable_for": ["playful", "energetic", "cheerful"]
+            }
+        ]
+    }
+
+# --------- Enhanced Chat with Voice Support ---------
+
+@app.post("/chat/voice")
+async def voice_chat(req: VoiceRequest):
+    """Complete voice chat flow: speech-to-text, AI response, text-to-speech"""
+    try:
+        print(f"Voice chat request for user {req.user_id}, character {req.character_id}")
+        
+        # Step 1: Convert speech to text
+        stt_response = await speech_to_text(req)
+        user_message = stt_response["transcribed_text"]
+        
+        if not user_message.strip():
+            raise HTTPException(status_code=400, detail="No speech detected")
+        
+        # Step 2: Generate AI response (reuse existing chat logic)
+        chat_request = ChatRequest(
+            user_id=req.user_id,
+            character_id=req.character_id,
+            message=user_message
+        )
+        
+        # Get chat response (from existing chat endpoint logic)
+        character_result = supabase.table("characters").select("*").eq("id", req.character_id).execute()
+        if not character_result.data:
+            raise HTTPException(status_code=404, detail="Character not found")
+        
+        character = character_result.data[0]
+        persona = character.get("persona", {})
+        
+        # Build system prompt (reuse from chat endpoint)
+        character_name = persona.get('name', character.get('name', 'AI Companion'))
+        character_style = persona.get('style', 'friendly and supportive')
+        character_bio = persona.get('bio', '')
+        
+        system_prompt = f"""You are {character_name}, an AI companion speaking in voice chat.
+        Your personality style: {character_style}
+        {f"Background: {character_bio}" if character_bio else ""}
+        
+        Guidelines for voice responses:
+        - Keep responses conversational and natural for speech
+        - Use shorter sentences that flow well when spoken
+        - Avoid complex formatting or lists
+        - Be engaging and expressive in tone
+        - Don't mention generating images in voice mode
+        """
+
+        # Get recent conversation context
+        try:
+            recent_memories = supabase.table("memories").select("message, response")\
+                .eq("user_id", req.user_id)\
+                .eq("character_id", req.character_id)\
+                .order("created_at", desc=True)\
+                .limit(5)\
+                .execute()
+            
+            conversation_history = []
+            if recent_memories.data:
+                for memory in reversed(recent_memories.data):
+                    if memory.get("message"):
+                        conversation_history.append({"role": "user", "content": memory["message"]})
+                    if memory.get("response"):
+                        conversation_history.append({"role": "assistant", "content": memory["response"]})
+        
+        except Exception as e:
+            print(f"Warning: Could not load conversation history: {str(e)}")
+            conversation_history = []
+
+        # Generate AI response
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(conversation_history)
+        messages.append({"role": "user", "content": user_message})
+
+        completion = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=300,  # Shorter for voice
+            temperature=0.8
+        )
+        ai_response = completion.choices[0].message.content
+        
+        # Step 3: Convert AI response to speech
+        tts_request = TextToSpeechRequest(
+            text=ai_response,
+            character_id=req.character_id
+        )
+        tts_response = await text_to_speech(tts_request)
+        
+        # Step 4: Save conversation to memories
+        try:
+            memory_data = {
+                "user_id": req.user_id,
+                "character_id": req.character_id,
+                "message": user_message,
+                "response": ai_response,
+                "interaction_type": "voice",
+                "created_at": datetime.utcnow().isoformat()
+            }
+            supabase.table("memories").insert(memory_data).execute()
+        except Exception as e:
+            print(f"Warning: Could not save voice conversation: {str(e)}")
+        
+        return {
+            "transcribed_text": user_message,
+            "ai_response": ai_response,
+            "audio_data": tts_response["audio_data"],
+            "audio_format": tts_response["format"],
+            "voice_used": tts_response["voice_used"]
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Voice chat error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Voice chat failed: {str(e)}")
+
+# --------- Voice Analytics ---------
+
+@app.get("/users/{user_id}/voice-stats")
+async def get_voice_stats(user_id: str):
+    """Get voice interaction statistics"""
+    try:
+        # Get voice interaction count
+        voice_interactions = supabase.table("memories").select("id")\
+            .eq("user_id", user_id)\
+            .eq("interaction_type", "voice")\
+            .execute()
+        
+        voice_count = len(voice_interactions.data) if voice_interactions.data else 0
+        
+        # Get total interactions for comparison
+        total_interactions = supabase.table("memories").select("id")\
+            .eq("user_id", user_id)\
+            .execute()
+        
+        total_count = len(total_interactions.data) if total_interactions.data else 0
+        
+        return {
+            "voice_interactions": voice_count,
+            "total_interactions": total_count,
+            "voice_percentage": round((voice_count / total_count * 100) if total_count > 0 else 0, 1)
+        }
+    
+    except Exception as e:
+        print(f"Voice stats error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get voice stats")
+
+# --------- Voice Testing Endpoints ---------
+
+@app.post("/voice/test-tts")
+async def test_text_to_speech(text: str = "Hello! This is a test of the text-to-speech system.", voice: str = "alloy"):
+    """Test text-to-speech functionality"""
+    try:
+        response = openai_client.audio.speech.create(
+            model="tts-1",
+            voice=voice,
+            input=text,
+            speed=1.0
+        )
+        
+        audio_data = base64.b64encode(response.content).decode('utf-8')
+        
+        return {
+            "audio_data": audio_data,
+            "format": "mp3",
+            "text": text,
+            "voice": voice
+        }
+    
+    except Exception as e:
+        print(f"TTS test error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"TTS test failed: {str(e)}")
+
+# Add to requirements.txt:
+# pydub
+# ffmpeg-python
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
