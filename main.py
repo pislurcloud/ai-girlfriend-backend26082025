@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from supabase import create_client, Client
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
@@ -1034,13 +1034,17 @@ async def get_user_stats(user_id: str):
 
 # --------- Enhanced Voice Models with Validation ---------
 
+#from pydantic import BaseModel, field_validator
+#import base64
+
 class VoiceRequest(BaseModel):
     user_id: str
     character_id: str
     audio_data: str  # Base64 encoded audio
     format: str = "webm"
     
-    @validator('audio_data')
+    @field_validator('audio_data')
+    @classmethod
     def validate_audio_data(cls, v):
         if not v or len(v) < 100:  # Basic validation
             raise ValueError('Audio data appears to be empty or too short')
@@ -1051,19 +1055,25 @@ class VoiceRequest(BaseModel):
             raise ValueError('Invalid base64 audio data')
         return v
     
-    @validator('format')
+    @field_validator('format')
+    @classmethod
     def validate_format(cls, v):
         allowed_formats = ['webm', 'ogg', 'wav', 'mp3', 'm4a']
         if v.lower() not in allowed_formats:
             raise ValueError(f'Unsupported audio format. Allowed: {allowed_formats}')
         return v.lower()
 
+
+#from typing import Optional, Dict, Any
+#from pydantic import BaseModel, field_validator
+
 class TextToSpeechRequest(BaseModel):
     text: str
     character_id: str
     voice_style: Optional[str] = None
     
-    @validator('text')
+    @field_validator('text')
+    @classmethod
     def validate_text(cls, v):
         if not v or len(v.strip()) == 0:
             raise ValueError('Text cannot be empty')
@@ -1071,12 +1081,14 @@ class TextToSpeechRequest(BaseModel):
             raise ValueError('Text too long for speech synthesis (max 4000 characters)')
         return v.strip()
 
+
 class VoiceSettingsRequest(BaseModel):
     character_id: str
     user_id: str
     voice_config: Dict[str, Any]
     
-    @validator('voice_config')
+    @field_validator('voice_config')
+    @classmethod
     def validate_voice_config(cls, v):
         required_fields = ['voice']
         for field in required_fields:
@@ -1093,6 +1105,7 @@ class VoiceSettingsRequest(BaseModel):
             raise ValueError('Speed must be between 0.25 and 4.0')
             
         return v
+
 
 # --------- Enhanced Voice Configuration Functions ---------
 
