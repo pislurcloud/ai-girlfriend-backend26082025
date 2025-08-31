@@ -1029,8 +1029,8 @@ async def get_user_stats(user_id: str):
 # Replace the voice-related sections in your main.py with this improved version
 
 # Enhanced logging setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+#logging.basicConfig(level=logging.INFO)
+#logger = logging.getLogger(__name__)
 
 # --------- Enhanced Voice Models with Validation ---------
 
