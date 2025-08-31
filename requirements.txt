@@ -11,3 +11,5 @@ pillow
 uuid
 pydub
 ffmpeg-python
+audioop-lts
+
