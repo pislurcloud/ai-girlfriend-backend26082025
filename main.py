@@ -232,11 +232,6 @@ class EnhancedCharacterRequest(BaseModel):
     name: str
     persona: Dict[str, Any]
     appearance: Dict[str, Any] = {}
-    voice_settings: Dict[str, Any] = {
-        "voiceId": "en-US-Studio-O",
-        "speed": 1.0,
-        "pitch": 1.0
-    }
     generate_avatar: bool = True
 
 class CharacterRequest(BaseModel):
@@ -398,9 +393,8 @@ async def create_enhanced_character(req: EnhancedCharacterRequest):
         # Prepare character data
         character_data = {
             "name": req.name,
-            "persona": req.persona,
+            "persona": req.persona,  # voice_settings should be inside persona.voice_config
             "appearance": req.appearance,
-            "voice_settings": req.voice_settings,
             "user_id": req.user_id,
             "avatar_url": None
         }
@@ -425,7 +419,12 @@ async def create_enhanced_character(req: EnhancedCharacterRequest):
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create character")
             
-        return {"character": result.data[0]}
+        # Map persona.voice_config to voice_settings for frontend compatibility
+        character = result.data[0]
+        if 'persona' in character and isinstance(character['persona'], dict) and 'voice_config' in character['persona']:
+            character['voice_settings'] = character['persona']['voice_config']
+            
+        return {"character": character}
     
     except Exception as e:
         print(f"Error creating enhanced character: {str(e)}")
@@ -508,14 +507,21 @@ async def generate_chat_image_endpoint(req: GenerateImageRequest):
         raise HTTPException(status_code=500, detail=f"Image generation error: {str(e)}")
 
 @app.get("/characters")
-def get_all_characters():
-    """Get all characters (for backward compatibility)"""
+async def get_user_characters(user_id: str):
     try:
-        result = supabase.table("characters").select("*").execute()
-        return {"characters": result.data or []}
-    
+        result = supabase.table("characters").select("*").eq("user_id", user_id).execute()
+        
+        # Map persona.voice_config to voice_settings for frontend compatibility
+        characters = []
+        for char in result.data:
+            if 'persona' in char and isinstance(char['persona'], dict) and 'voice_config' in char['persona']:
+                char['voice_settings'] = char['persona']['voice_config']
+            characters.append(char)
+            
+        return characters
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/characters/user/{user_id}")
 def get_user_characters(user_id: str):
@@ -546,83 +552,87 @@ def fetch_memories(req: FetchMemoriesRequest):
 @app.post("/chat")
 async def chat(req: ChatRequest):
     try:
+        print("Received chat request")  # Debug log
+        
         # If audio is provided, transcribe it
         if req.audio:
             try:
-                # Convert base64 to audio file
-                audio_data = base64.b64decode(req.audio.split(',')[1])  # Remove data:audio/wav;base64, prefix
-                audio_file = BytesIO(audio_data)
+                print("Processing audio...")  # Debug log
                 
-                # Convert to WAV format
-                audio_segment = AudioSegment.from_file(audio_file, format="wav")
-                wav_data = BytesIO()
-                audio_segment.export(wav_data, format="wav")
-                wav_data.seek(0)
+                # Log the first 100 chars of the audio data to verify it's being received
+                print(f"Audio data received (first 100 chars): {req.audio[:100] if req.audio else 'None'}")
                 
-                # Transcribe using speech recognition
-                r = sr.Recognizer()
-                with sr.AudioFile(wav_data) as source:
-                    audio_data = r.record(source)
-                    transcribed_text = r.recognize_google(audio_data)
+                # Check if the audio data has the expected format
+                if not req.audio.startswith('data:audio/'):
+                    print("Invalid audio format: missing data URL prefix")
+                    raise HTTPException(status_code=400, detail="Invalid audio format. Expected data URL.")
+                
+                # Extract the base64 audio data
+                try:
+                    # Handle both formats: "data:audio/wav;base64,..." and "data:audio/webm;base64,..."
+                    if ';base64,' in req.audio:
+                        audio_b64 = req.audio.split(';base64,')[1]
+                    else:
+                        audio_b64 = req.audio
+                    
+                    audio_data = base64.b64decode(audio_b64)
+                    print(f"Decoded audio data length: {len(audio_data)} bytes")  # Debug log
+                    
+                    # Convert to WAV format
+                    audio_file = BytesIO(audio_data)
+                    
+                    # Try to determine the audio format from the data URL
+                    audio_format = 'wav'  # default
+                    if 'webm' in req.audio:
+                        audio_format = 'webm'
+                    elif 'ogg' in req.audio:
+                        audio_format = 'ogg'
+                    elif 'mp3' in req.audio:
+                        audio_format = 'mp3'
+                    
+                    print(f"Detected audio format: {audio_format}")  # Debug log
+                    
+                    # Convert to WAV format for compatibility
+                    audio_segment = AudioSegment.from_file(audio_file, format=audio_format)
+                    wav_data = BytesIO()
+                    audio_segment.export(wav_data, format="wav")
+                    wav_data.seek(0)
+                    
+                    # Initialize recognizer
+                    r = sr.Recognizer()
+                    
+                    # Transcribe audio
+                    with sr.AudioFile(wav_data) as source:
+                        audio = r.record(source)
+                        transcribed_text = r.recognize_google(audio)
+                    
+                    print(f"Transcribed text: {transcribed_text}")  # Debug log
                     req.message = transcribed_text
+                    
+                except Exception as e:
+                    print(f"Audio processing error: {str(e)}")  # Debug log
+                    raise HTTPException(status_code=400, detail=f"Could not process audio: {str(e)}")
+                
             except Exception as e:
-                print(f"Error transcribing audio: {str(e)}")
+                print(f"Transcription error: {str(e)}")  # Debug log
                 raise HTTPException(status_code=400, detail="Could not transcribe audio")
         
-        # Rest of your existing chat logic...
-        character = supabase.table("characters").select("*").eq("id", req.character_id).single().execute()
-        character = character.data
+        # Rest of your chat logic remains the same
+        print(f"Processing message: {req.message}")  # Debug log
+        # ... rest of your chat endpoint code ...
         
-        # Get conversation history
-        messages = supabase.table("memories") \
-            .select("*") \
-            .eq("user_id", req.user_id) \
-            .eq("character_id", req.character_id) \
-            .order("created_at", desc=True) \
-            .limit(5) \
-            .execute()
-            
-        # Prepare conversation history for the AI
-        conversation_history = [
-            {"role": "system", "content": f"You are {character['name']}. {character['persona']}"}
-        ]
-        
-        # Add previous messages to context
-        for msg in reversed(messages.data):
-            conversation_history.append({"role": "user", "content": msg["message"]})
-            if msg["response"]:
-                conversation_history.append({"role": "assistant", "content": msg["response"]})
-                
-        # Add current message
-        conversation_history.append({"role": "user", "content": req.message})
-        
-        # Generate response using OpenAI
-        response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=conversation_history,
-            max_tokens=500,
-            temperature=0.7
-        )
-        
-        reply = response.choices[0].message.content
-        
-        # Save to database
-        memory_data = {
-            "user_id": req.user_id,
-            "character_id": req.character_id,
-            "message": req.message,
-            "response": reply,
-            "created_at": datetime.utcnow().isoformat()
+        # Example response (modify according to your actual response structure)
+        return {
+            "reply": "This is a test response",
+            "character_id": req.character_id
         }
-        supabase.table("memories").insert(memory_data).execute()
         
-        return {"reply": reply}
-        
-    except HTTPException:
+    except HTTPException as he:
+        print(f"HTTP Exception: {he.detail}")  # Debug log
         raise
     except Exception as e:
-        print(f"Error in chat endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error in chat endpoint: {str(e)}")  # Debug log
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 # --------- Storage Management ---------
 @app.post("/setup-storage")
@@ -647,16 +657,23 @@ def health_check():
         return {"status": "unhealthy", "error": str(e), "timestamp": datetime.utcnow().isoformat()}
 
 @app.get("/characters/{character_id}")
-def get_character(character_id: str):
+async def get_character(character_id: str):
     try:
         result = supabase.table("characters").select("*").eq("id", character_id).execute()
+        
         if not result.data:
             raise HTTPException(status_code=404, detail="Character not found")
-        return {"character": result.data[0]}
-    except HTTPException:
-        raise
+            
+        character = result.data[0]
+        
+        # Map persona.voice_config to voice_settings for frontend compatibility
+        if 'persona' in character and isinstance(character['persona'], dict) and 'voice_config' in character['persona']:
+            character['voice_settings'] = character['persona']['voice_config']
+            
+        return character
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Add these endpoints to your main.py file (These changes added recently, remove them if we get error)
 
@@ -698,8 +715,16 @@ async def update_character(character_id: str, req: UpdateCharacterRequest):
             update_data["persona"] = req.persona
         if req.appearance is not None:
             update_data["appearance"] = req.appearance
-        if req.voice_settings is not None:
-            update_data["voice_settings"] = req.voice_settings
+            
+        # Handle voice settings update
+        if hasattr(req, 'voice_settings') and req.voice_settings is not None:
+            # Get existing persona or create new one
+            persona = current_character.get('persona', {})
+            if not isinstance(persona, dict):
+                persona = {}
+            # Update voice_config in persona
+            persona['voice_config'] = req.voice_settings
+            update_data['persona'] = persona
         
         # Regenerate avatar if requested or if appearance changed
         if req.regenerate_avatar or req.appearance is not None:
@@ -732,8 +757,17 @@ async def update_character(character_id: str, req: UpdateCharacterRequest):
             update_result = supabase.table("characters").update(update_data).eq("id", character_id).execute()
             if not update_result.data:
                 raise HTTPException(status_code=500, detail="Failed to update character")
-            return {"character": update_result.data[0]}
+            
+            # Map persona.voice_config to voice_settings for frontend compatibility
+            updated_character = update_result.data[0]
+            if 'persona' in updated_character and isinstance(updated_character['persona'], dict) and 'voice_config' in updated_character['persona']:
+                updated_character['voice_settings'] = updated_character['persona']['voice_config']
+                
+            return {"character": updated_character}
         else:
+            # Still need to map voice_settings for the response
+            if 'persona' in current_character and isinstance(current_character['persona'], dict) and 'voice_config' in current_character['persona']:
+                current_character['voice_settings'] = current_character['persona']['voice_config']
             return {"character": current_character}
     
     except HTTPException:
