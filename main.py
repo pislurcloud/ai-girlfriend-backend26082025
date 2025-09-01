@@ -559,80 +559,106 @@ async def chat(req: ChatRequest):
             try:
                 print("Processing audio...")  # Debug log
                 
-                # Log the first 100 chars of the audio data to verify it's being received
-                print(f"Audio data received (first 100 chars): {req.audio[:100] if req.audio else 'None'}")
-                
-                # Check if the audio data has the expected format
-                if not req.audio.startswith('data:audio/'):
-                    print("Invalid audio format: missing data URL prefix")
-                    raise HTTPException(status_code=400, detail="Invalid audio format. Expected data URL.")
-                
                 # Extract the base64 audio data
-                try:
-                    # Handle both formats: "data:audio/wav;base64,..." and "data:audio/webm;base64,..."
-                    if ';base64,' in req.audio:
-                        audio_b64 = req.audio.split(';base64,')[1]
-                    else:
-                        audio_b64 = req.audio
-                    
-                    audio_data = base64.b64decode(audio_b64)
-                    print(f"Decoded audio data length: {len(audio_data)} bytes")  # Debug log
-                    
-                    # Convert to WAV format
-                    audio_file = BytesIO(audio_data)
-                    
-                    # Try to determine the audio format from the data URL
-                    audio_format = 'wav'  # default
-                    if 'webm' in req.audio:
-                        audio_format = 'webm'
-                    elif 'ogg' in req.audio:
-                        audio_format = 'ogg'
-                    elif 'mp3' in req.audio:
-                        audio_format = 'mp3'
-                    
-                    print(f"Detected audio format: {audio_format}")  # Debug log
-                    
-                    # Convert to WAV format for compatibility
-                    audio_segment = AudioSegment.from_file(audio_file, format=audio_format)
-                    wav_data = BytesIO()
-                    audio_segment.export(wav_data, format="wav")
-                    wav_data.seek(0)
-                    
-                    # Initialize recognizer
-                    r = sr.Recognizer()
-                    
-                    # Transcribe audio
-                    with sr.AudioFile(wav_data) as source:
-                        audio = r.record(source)
-                        transcribed_text = r.recognize_google(audio)
-                    
-                    print(f"Transcribed text: {transcribed_text}")  # Debug log
+                if ';base64,' in req.audio:
+                    audio_b64 = req.audio.split(';base64,')[1]
+                else:
+                    audio_b64 = req.audio
+                
+                audio_data = base64.b64decode(audio_b64)
+                print(f"Decoded audio data length: {len(audio_data)} bytes")
+                
+                # Convert to WAV format
+                audio_file = BytesIO(audio_data)
+                audio_segment = AudioSegment.from_file(audio_file)
+                wav_data = BytesIO()
+                audio_segment.export(wav_data, format="wav")
+                wav_data.seek(0)
+                
+                # Transcribe using speech recognition
+                r = sr.Recognizer()
+                with sr.AudioFile(wav_data) as source:
+                    audio = r.record(source)
+                    transcribed_text = r.recognize_google(audio)
+                    print(f"Transcribed text: {transcribed_text}")
                     req.message = transcribed_text
                     
-                except Exception as e:
-                    print(f"Audio processing error: {str(e)}")  # Debug log
-                    raise HTTPException(status_code=400, detail=f"Could not process audio: {str(e)}")
-                
             except Exception as e:
-                print(f"Transcription error: {str(e)}")  # Debug log
+                print(f"Audio processing error: {str(e)}")
                 raise HTTPException(status_code=400, detail="Could not transcribe audio")
         
-        # Rest of your chat logic remains the same
-        print(f"Processing message: {req.message}")  # Debug log
-        # ... rest of your chat endpoint code ...
+        # Get character info
+        character = supabase.table("characters").select("*").eq("id", req.character_id).single().execute()
+        character = character.data
         
-        # Example response (modify according to your actual response structure)
+        # Get conversation history
+        messages = supabase.table("conversations") \
+            .select("*") \
+            .eq("user_id", req.user_id) \
+            .eq("character_id", req.character_id) \
+            .order("created_at", {"ascending": False}) \
+            .limit(5) \
+            .execute()
+            
+        # Prepare conversation history for the AI
+        conversation_history = [
+            {"role": "system", "content": f"You are {character['name']}. {character['persona']}"}
+        ]
+        
+        # Add previous messages to context
+        for msg in reversed(messages.data or []):
+            role = "assistant" if msg["is_ai"] else "user"
+            conversation_history.append({"role": role, "content": msg["message"]})
+            
+        # Add current message
+        conversation_history.append({"role": "user", "content": req.message})
+        
+        # Generate response using OpenAI
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=conversation_history,
+            max_tokens=500,
+            temperature=0.7
+        )
+        
+        reply = response.choices[0].message.content
+        
+        # Save to database
+        supabase.table("conversations").insert([
+            {
+                "user_id": req.user_id,
+                "character_id": req.character_id,
+                "message": req.message,
+                "is_ai": False
+            },
+            {
+                "user_id": req.user_id,
+                "character_id": req.character_id,
+                "message": reply,
+                "is_ai": True
+            }
+        ]).execute()
+        
+        # Check if the message is a request to generate an image
+        image_url = None
+        if "generate image" in req.message.lower() or "create image" in req.message.lower():
+            try:
+                image_prompt = await enhance_image_prompt(f"Generate an image of {character.get('name')} {req.message}")
+                image_url = await generate_chat_image(image_prompt, req.user_id, req.character_id)
+            except Exception as e:
+                print(f"Error generating image: {str(e)}")
+                # Continue without image if generation fails
+        
         return {
-            "reply": "This is a test response",
-            "character_id": req.character_id
+            "reply": reply,
+            "image_url": image_url
         }
         
-    except HTTPException as he:
-        print(f"HTTP Exception: {he.detail}")  # Debug log
+    except HTTPException:
         raise
     except Exception as e:
-        print(f"Unexpected error in chat endpoint: {str(e)}")  # Debug log
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        print(f"Error in chat endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --------- Storage Management ---------
 @app.post("/setup-storage")
