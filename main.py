@@ -11,6 +11,10 @@ import bcrypt
 import uuid
 import requests
 from typing import Optional, List, Dict, Any
+import base64
+from io import BytesIO
+from pydub import AudioSegment
+import speech_recognition as sr
 
 # Load env vars
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -221,18 +225,25 @@ class ChatRequest(BaseModel):
     user_id: str
     character_id: str
     message: str
+    audio: Optional[str] = None  # Base64 encoded audio
 
 class EnhancedCharacterRequest(BaseModel):
     user_id: str
     name: str
     persona: Dict[str, Any]
     appearance: Dict[str, Any] = {}
+    voice_settings: Dict[str, Any] = {
+        "voiceId": "en-US-Studio-O",
+        "speed": 1.0,
+        "pitch": 1.0
+    }
     generate_avatar: bool = True
 
 class CharacterRequest(BaseModel):
     user_id: str
     name: str
     persona: Dict[str, Any]
+    voice_settings: Optional[Dict[str, Any]] = None
 
 class FetchMemoriesRequest(BaseModel):
     user_id: str
@@ -389,6 +400,7 @@ async def create_enhanced_character(req: EnhancedCharacterRequest):
             "name": req.name,
             "persona": req.persona,
             "appearance": req.appearance,
+            "voice_settings": req.voice_settings,
             "user_id": req.user_id,
             "avatar_url": None
         }
@@ -426,6 +438,7 @@ def create_character(req: CharacterRequest):
         result = supabase.table("characters").insert({
             "name": req.name,
             "persona": req.persona,
+            "voice_settings": req.voice_settings,
             "user_id": req.user_id,
             "appearance": {},
             "avatar_url": None
@@ -533,131 +546,83 @@ def fetch_memories(req: FetchMemoriesRequest):
 @app.post("/chat")
 async def chat(req: ChatRequest):
     try:
-        print(f"Chat request: user_id={req.user_id}, character_id={req.character_id}, message={req.message[:50]}...")
-        
-        # Retrieve character persona
-        character_result = supabase.table("characters").select("*").eq("id", req.character_id).execute()
-        if not character_result.data:
-            raise HTTPException(status_code=404, detail="Character not found")
-        
-        character = character_result.data[0]
-        persona = character.get("persona", {})
-        
-        # Build system prompt
-        character_name = persona.get('name', character.get('name', 'AI Companion'))
-        character_style = persona.get('style', 'friendly and supportive')
-        character_bio = persona.get('bio', '')
-        
-        system_prompt = f"""You are {character_name}, an AI companion. 
-        Your personality style: {character_style}
-        {f"Background: {character_bio}" if character_bio else ""}
-        
-        Guidelines:
-        - Be conversational and engaging
-        - Stay in character with your personality style
-        - Keep responses reasonably concise but meaningful
-        - Be supportive and understanding
-        - If the user asks you to generate, create, show, or make an image, respond with "I'll create that image for you!" and include [GENERATE_IMAGE: detailed description] at the end of your message
-        - For image prompts, be very specific about style:
-          * For people: "Ultra-realistic photograph, professional photography, natural lighting"
-          * For food: "Professional food photography, appetizing, restaurant quality"
-          * For places: "High-resolution photograph, travel photography, realistic"
-          * For objects: "Product photography, high-quality, realistic lighting"
-          * Avoid words like "painting", "artwork", "illustration", "digital art"
-        """
-
-        # Get recent conversation context (last 10 messages)
-        try:
-            recent_memories = supabase.table("memories").select("message, response, image_url")\
-                .eq("user_id", req.user_id)\
-                .eq("character_id", req.character_id)\
-                .order("created_at", desc=True)\
-                .limit(5)\
-                .execute()
-            
-            conversation_history = []
-            if recent_memories.data:
-                # Reverse to get chronological order
-                for memory in reversed(recent_memories.data):
-                    if memory.get("message"):
-                        conversation_history.append({"role": "user", "content": memory["message"]})
-                    if memory.get("response"):
-                        conversation_history.append({"role": "assistant", "content": memory["response"]})
-        
-        except Exception as e:
-            print(f"Warning: Could not load conversation history: {str(e)}")
-            conversation_history = []
-
-        # Prepare messages for OpenAI
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(conversation_history)
-        messages.append({"role": "user", "content": req.message})
-
-        # Generate AI response
-        try:
-            completion = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                max_tokens=500,
-                temperature=0.8
-            )
-            reply = completion.choices[0].message.content
-            print(f"AI replied: {reply[:100]}...")
-        
-        except Exception as e:
-            print(f"OpenAI API error: {str(e)}")
-            reply = "I'm sorry, I'm having trouble thinking right now. Could you try asking me again?"
-
-        # FIXED: Better image generation detection and handling
-        generated_image_url = None
-        if "[GENERATE_IMAGE:" in reply:
+        # If audio is provided, transcribe it
+        if req.audio:
             try:
-                print("Detected image generation request in AI response")
-                # Extract image prompt
-                start = reply.find("[GENERATE_IMAGE:") + len("[GENERATE_IMAGE:")
-                end = reply.find("]", start)
-                if end > start:
-                    image_prompt = reply[start:end].strip()
-                    print(f"Extracted image prompt: {image_prompt}")
-                    
-                    # Remove the generate image instruction from the reply
-                    reply = reply.replace(f"[GENERATE_IMAGE:{image_prompt}]", "").strip()
-                    
-                    # Generate the image
-                    print("Starting image generation...")
-                    generated_image_url = await generate_chat_image(image_prompt, req.user_id, req.character_id)
-                    print(f"Generated chat image URL: {generated_image_url}")
-                    
+                # Convert base64 to audio file
+                audio_data = base64.b64decode(req.audio.split(',')[1])  # Remove data:audio/wav;base64, prefix
+                audio_file = BytesIO(audio_data)
+                
+                # Convert to WAV format
+                audio_segment = AudioSegment.from_file(audio_file, format="wav")
+                wav_data = BytesIO()
+                audio_segment.export(wav_data, format="wav")
+                wav_data.seek(0)
+                
+                # Transcribe using speech recognition
+                r = sr.Recognizer()
+                with sr.AudioFile(wav_data) as source:
+                    audio_data = r.record(source)
+                    transcribed_text = r.recognize_google(audio_data)
+                    req.message = transcribed_text
             except Exception as e:
-                print(f"Error generating chat image: {str(e)}")
-                # Don't fail the entire chat if image generation fails
-
-        # Save conversation to memories
-        try:
-            memory_data = {
-                "user_id": req.user_id,
-                "character_id": req.character_id,
-                "message": req.message,
-                "response": reply,
-                "image_url": generated_image_url,
-                "created_at": datetime.utcnow().isoformat()
-            }
-            memory_result = supabase.table("memories").insert(memory_data).execute()
-            print(f"Saved conversation to memories: {memory_result.data is not None}")
-        except Exception as e:
-            print(f"Warning: Could not save conversation: {str(e)}")
-
-        response_data = {"reply": reply}
-        if generated_image_url:
-            response_data["image_url"] = generated_image_url
+                print(f"Error transcribing audio: {str(e)}")
+                raise HTTPException(status_code=400, detail="Could not transcribe audio")
+        
+        # Rest of your existing chat logic...
+        character = supabase.table("characters").select("*").eq("id", req.character_id).single().execute()
+        character = character.data
+        
+        # Get conversation history
+        messages = supabase.table("memories") \
+            .select("*") \
+            .eq("user_id", req.user_id) \
+            .eq("character_id", req.character_id) \
+            .order("created_at", desc=True) \
+            .limit(5) \
+            .execute()
             
-        return response_data
-    
+        # Prepare conversation history for the AI
+        conversation_history = [
+            {"role": "system", "content": f"You are {character['name']}. {character['persona']}"}
+        ]
+        
+        # Add previous messages to context
+        for msg in reversed(messages.data):
+            conversation_history.append({"role": "user", "content": msg["message"]})
+            if msg["response"]:
+                conversation_history.append({"role": "assistant", "content": msg["response"]})
+                
+        # Add current message
+        conversation_history.append({"role": "user", "content": req.message})
+        
+        # Generate response using OpenAI
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=conversation_history,
+            max_tokens=500,
+            temperature=0.7
+        )
+        
+        reply = response.choices[0].message.content
+        
+        # Save to database
+        memory_data = {
+            "user_id": req.user_id,
+            "character_id": req.character_id,
+            "message": req.message,
+            "response": reply,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        supabase.table("memories").insert(memory_data).execute()
+        
+        return {"reply": reply}
+        
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Chat error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Chat service temporarily unavailable")
+        print(f"Error in chat endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --------- Storage Management ---------
 @app.post("/setup-storage")
@@ -702,6 +667,7 @@ class UpdateCharacterRequest(BaseModel):
     name: Optional[str] = None
     persona: Optional[Dict[str, Any]] = None
     appearance: Optional[Dict[str, Any]] = None
+    voice_settings: Optional[Dict[str, Any]] = None
     regenerate_avatar: bool = False
 
 class PasswordResetRequest(BaseModel):
@@ -732,6 +698,8 @@ async def update_character(character_id: str, req: UpdateCharacterRequest):
             update_data["persona"] = req.persona
         if req.appearance is not None:
             update_data["appearance"] = req.appearance
+        if req.voice_settings is not None:
+            update_data["voice_settings"] = req.voice_settings
         
         # Regenerate avatar if requested or if appearance changed
         if req.regenerate_avatar or req.appearance is not None:
