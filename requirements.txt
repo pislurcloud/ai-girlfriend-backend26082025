@@ -9,3 +9,5 @@ python-multipart
 requests
 pillow
 uuid
+SpeechRecognition
+pydub
