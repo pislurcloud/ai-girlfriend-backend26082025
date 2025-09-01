@@ -1,4 +1,173 @@
-from fastapi import FastAPI, HTTPException, Depends, Query
+@app.get("/characters/{character_id}")
+def get_character(character_id: str):
+    try:
+        result = supabase.table("characters").select("*").eq("id", character_id).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Character not found")
+        return {"character": result.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+# --------- Enhanced Character Management Endpoints ---------
+
+@app.put("/characters/{character_id}")
+async def edit_character(character_id: str, req: EditCharacterRequest):
+    """Edit an existing character"""
+    try:
+        # Verify character ownership
+        existing = supabase.table("characters").select("*").eq("id", character_id).eq("user_id", req.user_id).execute()
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Character not found or not owned by user")
+        
+        # Update character
+        update_data = {
+            "name": req.name,
+            "persona": req.persona,
+            "appearance": req.appearance,
+            "updated_at": datetime.utcnow().isoformat()
+        }
+        
+        result = supabase.table("characters").update(update_data).eq("id", character_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to update character")
+            
+        return {"character": result.data[0]}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating character: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Character update error: {str(e)}")
+
+@app.delete("/characters/{character_id}")
+async def delete_character(character_id: str, req: DeleteCharacterRequest):
+    """Delete a character and all associated data"""
+    try:
+        # Verify character ownership
+        existing = supabase.table("characters").select("*").eq("id", character_id).eq("user_id", req.user_id).execute()
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Character not found or not owned by user")
+        
+        character = existing.data[0]
+        
+        # Delete associated memories first
+        try:
+            supabase.table("memories").delete().eq("character_id", character_id).eq("user_id", req.user_id).execute()
+        except Exception as e:
+            print(f"Warning: Could not delete memories: {str(e)}")
+        
+        # Delete character avatar from storage if exists
+        if character.get("avatar_url"):
+            try:
+                # Extract filename from URL to delete from storage
+                avatar_url = character["avatar_url"]
+                if "character-images" in avatar_url:
+                    # Extract the file path after the bucket name
+                    filename = avatar_url.split("character-images/")[-1].split("?")[0]
+                    supabase.storage.from_("character-images").remove([filename])
+            except Exception as e:
+                print(f"Warning: Could not delete avatar image: {str(e)}")
+        
+        # Delete character
+        result = supabase.table("characters").delete().eq("id", character_id).execute()
+        
+        return {"message": "Character deleted successfully", "deleted_character": character}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting character: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Character deletion error: {str(e)}")
+
+@app.post("/users/reset-password")
+async def reset_password(req: PasswordResetRequest):
+    """Send password reset email (placeholder - implement with your email service)"""
+    try:
+        # Check if user exists
+        result = supabase.table("users").select("id, username").eq("email", req.email).execute()
+        if not result.data:
+            # For security, don't reveal if email exists or not
+            return {"message": "If the email exists in our system, you will receive reset instructions"}
+        
+        user_data = result.data[0]
+        
+        # Generate reset token (expires in 1 hour)
+        reset_token = jwt.encode({
+            "user_id": str(user_data["id"]),
+            "type": "password_reset",
+            "exp": datetime.utcnow() + timedelta(hours=1)
+        }, SECRET_KEY, algorithm=ALGORITHM)
+        
+        # Store reset token in database
+        supabase.table("password_resets").insert({
+            "user_id": user_data["id"],
+            "token": reset_token,
+            "email": req.email,
+            "created_at": datetime.utcnow().isoformat(),
+            "expires_at": (datetime.utcnow() + timedelta(hours=1)).isoformat()
+        }).execute()
+        
+        # TODO: Send actual email with reset link
+        # For now, just log it (implement email service like SendGrid, Resend, etc.)
+        reset_link = f"https://yourapp.com/reset-password?token={reset_token}"
+        print(f"Password reset requested for {req.email}")
+        print(f"Reset link (implement email sending): {reset_link}")
+        
+        return {"message": "If the email exists in our system, you will receive reset instructions"}
+    
+    except Exception as e:
+        print(f"Password reset error: {str(e)}")
+        # Don't reveal errors to user for security
+        return {"message": "If the email exists in our system, you will receive reset instructions"}
+
+@app.post("/users/confirm-reset-password")
+async def confirm_password_reset(token: str, new_password: str):
+    """Confirm password reset with token"""
+    try:
+        # Verify and decode token
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            user_id = payload.get("sub")
+            token_type = payload.get("type")
+            
+            if token_type != "password_reset":
+                raise HTTPException(status_code=400, detail="Invalid token type")
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=400, detail="Reset token has expired")
+        except jwt.JWTError:
+            raise HTTPException(status_code=400, detail="Invalid reset token")
+        
+        # Check if token exists and hasn't been used
+        token_result = supabase.table("password_resets").select("*").eq("token", token).eq("used", False).execute()
+        if not token_result.data:
+            raise HTTPException(status_code=400, detail="Invalid or already used reset token")
+        
+        # Update user password
+        hashed_password = hash_password(new_password)
+        user_update = supabase.table("users").update({
+            "password_hash": hashed_password,
+            "updated_at": datetime.utcnow().isoformat()
+        }).eq("id", user_id).execute()
+        
+        if not user_update.data:
+            raise HTTPException(status_code=500, detail="Failed to update password")
+        
+        # Mark token as used
+        supabase.table("password_resets").update({
+            "used": True,
+            "used_at": datetime.utcnow().isoformat()
+        }).eq("token", token).execute()
+        
+        return {"message": "Password updated successfully"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Confirm reset error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Password reset failed")from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -11,10 +180,6 @@ import bcrypt
 import uuid
 import requests
 from typing import Optional, List, Dict, Any
-import base64
-from io import BytesIO
-from pydub import AudioSegment
-import speech_recognition as sr
 
 # Load env vars
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -225,7 +390,6 @@ class ChatRequest(BaseModel):
     user_id: str
     character_id: str
     message: str
-    audio: Optional[str] = None  # Base64 encoded audio
 
 class EnhancedCharacterRequest(BaseModel):
     user_id: str
@@ -238,7 +402,6 @@ class CharacterRequest(BaseModel):
     user_id: str
     name: str
     persona: Dict[str, Any]
-    voice_settings: Optional[Dict[str, Any]] = None
 
 class FetchMemoriesRequest(BaseModel):
     user_id: str
@@ -270,6 +433,18 @@ class GenerateImageRequest(BaseModel):
 # FIXED: Added proper request model for avatar generation
 class GenerateAvatarRequest(BaseModel):
     user_id: str
+
+class EditCharacterRequest(BaseModel):
+    user_id: str
+    name: str
+    persona: Dict[str, Any]
+    appearance: Dict[str, Any] = {}
+
+class DeleteCharacterRequest(BaseModel):
+    user_id: str
+
+class PasswordResetRequest(BaseModel):
+    email: str
 
 # --------- Endpoints ---------
 
@@ -393,7 +568,7 @@ async def create_enhanced_character(req: EnhancedCharacterRequest):
         # Prepare character data
         character_data = {
             "name": req.name,
-            "persona": req.persona,  # voice_settings should be inside persona.voice_config
+            "persona": req.persona,
             "appearance": req.appearance,
             "user_id": req.user_id,
             "avatar_url": None
@@ -419,12 +594,7 @@ async def create_enhanced_character(req: EnhancedCharacterRequest):
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create character")
             
-        # Map persona.voice_config to voice_settings for frontend compatibility
-        character = result.data[0]
-        if 'persona' in character and isinstance(character['persona'], dict) and 'voice_config' in character['persona']:
-            character['voice_settings'] = character['persona']['voice_config']
-            
-        return {"character": character}
+        return {"character": result.data[0]}
     
     except Exception as e:
         print(f"Error creating enhanced character: {str(e)}")
@@ -437,7 +607,6 @@ def create_character(req: CharacterRequest):
         result = supabase.table("characters").insert({
             "name": req.name,
             "persona": req.persona,
-            "voice_settings": req.voice_settings,
             "user_id": req.user_id,
             "appearance": {},
             "avatar_url": None
@@ -507,21 +676,14 @@ async def generate_chat_image_endpoint(req: GenerateImageRequest):
         raise HTTPException(status_code=500, detail=f"Image generation error: {str(e)}")
 
 @app.get("/characters")
-async def get_user_characters(user_id: str):
+def get_all_characters():
+    """Get all characters (for backward compatibility)"""
     try:
-        result = supabase.table("characters").select("*").eq("user_id", user_id).execute()
-        
-        # Map persona.voice_config to voice_settings for frontend compatibility
-        characters = []
-        for char in result.data:
-            if 'persona' in char and isinstance(char['persona'], dict) and 'voice_config' in char['persona']:
-                char['voice_settings'] = char['persona']['voice_config']
-            characters.append(char)
-            
-        return characters
-        
+        result = supabase.table("characters").select("*").execute()
+        return {"characters": result.data or []}
+    
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/characters/user/{user_id}")
 def get_user_characters(user_id: str):
@@ -552,113 +714,131 @@ def fetch_memories(req: FetchMemoriesRequest):
 @app.post("/chat")
 async def chat(req: ChatRequest):
     try:
-        print("Received chat request")  # Debug log
+        print(f"Chat request: user_id={req.user_id}, character_id={req.character_id}, message={req.message[:50]}...")
         
-        # If audio is provided, transcribe it
-        if req.audio:
+        # Retrieve character persona
+        character_result = supabase.table("characters").select("*").eq("id", req.character_id).execute()
+        if not character_result.data:
+            raise HTTPException(status_code=404, detail="Character not found")
+        
+        character = character_result.data[0]
+        persona = character.get("persona", {})
+        
+        # Build system prompt
+        character_name = persona.get('name', character.get('name', 'AI Companion'))
+        character_style = persona.get('style', 'friendly and supportive')
+        character_bio = persona.get('bio', '')
+        
+        system_prompt = f"""You are {character_name}, an AI companion. 
+        Your personality style: {character_style}
+        {f"Background: {character_bio}" if character_bio else ""}
+        
+        Guidelines:
+        - Be conversational and engaging
+        - Stay in character with your personality style
+        - Keep responses reasonably concise but meaningful
+        - Be supportive and understanding
+        - If the user asks you to generate, create, show, or make an image, respond with "I'll create that image for you!" and include [GENERATE_IMAGE: detailed description] at the end of your message
+        - For image prompts, be very specific about style:
+          * For people: "Ultra-realistic photograph, professional photography, natural lighting"
+          * For food: "Professional food photography, appetizing, restaurant quality"
+          * For places: "High-resolution photograph, travel photography, realistic"
+          * For objects: "Product photography, high-quality, realistic lighting"
+          * Avoid words like "painting", "artwork", "illustration", "digital art"
+        """
+
+        # Get recent conversation context (last 10 messages)
+        try:
+            recent_memories = supabase.table("memories").select("message, response, image_url")\
+                .eq("user_id", req.user_id)\
+                .eq("character_id", req.character_id)\
+                .order("created_at", desc=True)\
+                .limit(5)\
+                .execute()
+            
+            conversation_history = []
+            if recent_memories.data:
+                # Reverse to get chronological order
+                for memory in reversed(recent_memories.data):
+                    if memory.get("message"):
+                        conversation_history.append({"role": "user", "content": memory["message"]})
+                    if memory.get("response"):
+                        conversation_history.append({"role": "assistant", "content": memory["response"]})
+        
+        except Exception as e:
+            print(f"Warning: Could not load conversation history: {str(e)}")
+            conversation_history = []
+
+        # Prepare messages for OpenAI
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(conversation_history)
+        messages.append({"role": "user", "content": req.message})
+
+        # Generate AI response
+        try:
+            completion = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                max_tokens=500,
+                temperature=0.8
+            )
+            reply = completion.choices[0].message.content
+            print(f"AI replied: {reply[:100]}...")
+        
+        except Exception as e:
+            print(f"OpenAI API error: {str(e)}")
+            reply = "I'm sorry, I'm having trouble thinking right now. Could you try asking me again?"
+
+        # FIXED: Better image generation detection and handling
+        generated_image_url = None
+        if "[GENERATE_IMAGE:" in reply:
             try:
-                print("Processing audio...")  # Debug log
-                
-                # Extract the base64 audio data
-                if ';base64,' in req.audio:
-                    audio_b64 = req.audio.split(';base64,')[1]
-                else:
-                    audio_b64 = req.audio
-                
-                audio_data = base64.b64decode(audio_b64)
-                print(f"Decoded audio data length: {len(audio_data)} bytes")
-                
-                # Convert to WAV format
-                audio_file = BytesIO(audio_data)
-                audio_segment = AudioSegment.from_file(audio_file)
-                wav_data = BytesIO()
-                audio_segment.export(wav_data, format="wav")
-                wav_data.seek(0)
-                
-                # Transcribe using speech recognition
-                r = sr.Recognizer()
-                with sr.AudioFile(wav_data) as source:
-                    audio = r.record(source)
-                    transcribed_text = r.recognize_google(audio)
-                    print(f"Transcribed text: {transcribed_text}")
-                    req.message = transcribed_text
+                print("Detected image generation request in AI response")
+                # Extract image prompt
+                start = reply.find("[GENERATE_IMAGE:") + len("[GENERATE_IMAGE:")
+                end = reply.find("]", start)
+                if end > start:
+                    image_prompt = reply[start:end].strip()
+                    print(f"Extracted image prompt: {image_prompt}")
+                    
+                    # Remove the generate image instruction from the reply
+                    reply = reply.replace(f"[GENERATE_IMAGE:{image_prompt}]", "").strip()
+                    
+                    # Generate the image
+                    print("Starting image generation...")
+                    generated_image_url = await generate_chat_image(image_prompt, req.user_id, req.character_id)
+                    print(f"Generated chat image URL: {generated_image_url}")
                     
             except Exception as e:
-                print(f"Audio processing error: {str(e)}")
-                raise HTTPException(status_code=400, detail="Could not transcribe audio")
-        
-        # Get character info
-        character = supabase.table("characters").select("*").eq("id", req.character_id).single().execute()
-        character = character.data
-        
-        # Get conversation history
-        messages = supabase.table("conversations") \
-            .select("*") \
-            .eq("user_id", req.user_id) \
-            .eq("character_id", req.character_id) \
-            .order("created_at", {"ascending": False}) \
-            .limit(5) \
-            .execute()
-            
-        # Prepare conversation history for the AI
-        conversation_history = [
-            {"role": "system", "content": f"You are {character['name']}. {character['persona']}"}
-        ]
-        
-        # Add previous messages to context
-        for msg in reversed(messages.data or []):
-            role = "assistant" if msg["is_ai"] else "user"
-            conversation_history.append({"role": role, "content": msg["message"]})
-            
-        # Add current message
-        conversation_history.append({"role": "user", "content": req.message})
-        
-        # Generate response using OpenAI
-        response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=conversation_history,
-            max_tokens=500,
-            temperature=0.7
-        )
-        
-        reply = response.choices[0].message.content
-        
-        # Save to database
-        supabase.table("conversations").insert([
-            {
+                print(f"Error generating chat image: {str(e)}")
+                # Don't fail the entire chat if image generation fails
+
+        # Save conversation to memories
+        try:
+            memory_data = {
                 "user_id": req.user_id,
                 "character_id": req.character_id,
                 "message": req.message,
-                "is_ai": False
-            },
-            {
-                "user_id": req.user_id,
-                "character_id": req.character_id,
-                "message": reply,
-                "is_ai": True
+                "response": reply,
+                "image_url": generated_image_url,
+                "created_at": datetime.utcnow().isoformat()
             }
-        ]).execute()
-        
-        # Check if the message is a request to generate an image
-        image_url = None
-        if "generate image" in req.message.lower() or "create image" in req.message.lower():
-            try:
-                image_prompt = await enhance_image_prompt(f"Generate an image of {character.get('name')} {req.message}")
-                image_url = await generate_chat_image(image_prompt, req.user_id, req.character_id)
-            except Exception as e:
-                print(f"Error generating image: {str(e)}")
-                # Continue without image if generation fails
-        
-        return {
-            "reply": reply,
-            "image_url": image_url
-        }
-        
+            memory_result = supabase.table("memories").insert(memory_data).execute()
+            print(f"Saved conversation to memories: {memory_result.data is not None}")
+        except Exception as e:
+            print(f"Warning: Could not save conversation: {str(e)}")
+
+        response_data = {"reply": reply}
+        if generated_image_url:
+            response_data["image_url"] = generated_image_url
+            
+        return response_data
+    
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error in chat endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Chat error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Chat service temporarily unavailable")
 
 # --------- Storage Management ---------
 @app.post("/setup-storage")
@@ -683,362 +863,17 @@ def health_check():
         return {"status": "unhealthy", "error": str(e), "timestamp": datetime.utcnow().isoformat()}
 
 @app.get("/characters/{character_id}")
-async def get_character(character_id: str):
+def get_character(character_id: str):
     try:
         result = supabase.table("characters").select("*").eq("id", character_id).execute()
-        
         if not result.data:
             raise HTTPException(status_code=404, detail="Character not found")
-            
-        character = result.data[0]
-        
-        # Map persona.voice_config to voice_settings for frontend compatibility
-        if 'persona' in character and isinstance(character['persona'], dict) and 'voice_config' in character['persona']:
-            character['voice_settings'] = character['persona']['voice_config']
-            
-        return character
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Add these endpoints to your main.py file (These changes added recently, remove them if we get error)
-
-# --------- Character Management Enhancements ---------
-
-class UpdateCharacterRequest(BaseModel):
-    user_id: str
-    name: Optional[str] = None
-    persona: Optional[Dict[str, Any]] = None
-    appearance: Optional[Dict[str, Any]] = None
-    voice_settings: Optional[Dict[str, Any]] = None
-    regenerate_avatar: bool = False
-
-class PasswordResetRequest(BaseModel):
-    username: str
-    email: str
-
-class PasswordUpdateRequest(BaseModel):
-    username: str
-    new_password: str
-    reset_token: str
-
-@app.put("/characters/{character_id}")
-async def update_character(character_id: str, req: UpdateCharacterRequest):
-    """Update character details and optionally regenerate avatar"""
-    try:
-        # Verify character ownership
-        result = supabase.table("characters").select("*").eq("id", character_id).eq("user_id", req.user_id).execute()
-        if not result.data:
-            raise HTTPException(status_code=404, detail="Character not found or not owned by user")
-        
-        current_character = result.data[0]
-        
-        # Prepare update data
-        update_data = {}
-        if req.name is not None:
-            update_data["name"] = req.name
-        if req.persona is not None:
-            update_data["persona"] = req.persona
-        if req.appearance is not None:
-            update_data["appearance"] = req.appearance
-            
-        # Handle voice settings update
-        if hasattr(req, 'voice_settings') and req.voice_settings is not None:
-            # Get existing persona or create new one
-            persona = current_character.get('persona', {})
-            if not isinstance(persona, dict):
-                persona = {}
-            # Update voice_config in persona
-            persona['voice_config'] = req.voice_settings
-            update_data['persona'] = persona
-        
-        # Regenerate avatar if requested or if appearance changed
-        if req.regenerate_avatar or req.appearance is not None:
-            print(f"Regenerating avatar for character {character_id}")
-            
-            # Merge current data with updates for avatar generation
-            character_data = {
-                "name": req.name or current_character.get("name"),
-                "persona": req.persona or current_character.get("persona", {}),
-                "appearance": req.appearance or current_character.get("appearance", {})
-            }
-            
-            avatar_url = await generate_and_store_character_image(character_data, req.user_id)
-            if avatar_url:
-                update_data["avatar_url"] = avatar_url
-                
-                # Delete old avatar if it exists
-                if current_character.get("avatar_url"):
-                    try:
-                        # Extract filename from URL for deletion
-                        old_url = current_character["avatar_url"]
-                        if "character-images" in old_url:
-                            filename = old_url.split("character-images/")[1]
-                            supabase.storage.from_("character-images").remove([filename])
-                    except Exception as e:
-                        print(f"Warning: Could not delete old avatar: {str(e)}")
-        
-        # Update character in database
-        if update_data:
-            update_result = supabase.table("characters").update(update_data).eq("id", character_id).execute()
-            if not update_result.data:
-                raise HTTPException(status_code=500, detail="Failed to update character")
-            
-            # Map persona.voice_config to voice_settings for frontend compatibility
-            updated_character = update_result.data[0]
-            if 'persona' in updated_character and isinstance(updated_character['persona'], dict) and 'voice_config' in updated_character['persona']:
-                updated_character['voice_settings'] = updated_character['persona']['voice_config']
-                
-            return {"character": updated_character}
-        else:
-            # Still need to map voice_settings for the response
-            if 'persona' in current_character and isinstance(current_character['persona'], dict) and 'voice_config' in current_character['persona']:
-                current_character['voice_settings'] = current_character['persona']['voice_config']
-            return {"character": current_character}
-    
+        return {"character": result.data[0]}
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error updating character: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Character update error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-@app.delete("/characters/{character_id}")
-async def delete_character(character_id: str, user_id: str = Query(...)):
-    """Delete character and associated data"""
-    try:
-        # Verify character ownership
-        result = supabase.table("characters").select("*").eq("id", character_id).eq("user_id", user_id).execute()
-        if not result.data:
-            raise HTTPException(status_code=404, detail="Character not found or not owned by user")
-        
-        character = result.data[0]
-        
-        # Delete character avatar from storage
-        if character.get("avatar_url"):
-            try:
-                old_url = character["avatar_url"]
-                if "character-images" in old_url:
-                    filename = old_url.split("character-images/")[1]
-                    supabase.storage.from_("character-images").remove([filename])
-            except Exception as e:
-                print(f"Warning: Could not delete avatar: {str(e)}")
-        
-        # Delete all chat images for this character
-        try:
-            # Get all memories with images for this character
-            memories_with_images = supabase.table("memories").select("image_url")\
-                .eq("character_id", character_id)\
-                .eq("user_id", user_id)\
-                .not_("image_url", "is", None)\
-                .execute()
-            
-            if memories_with_images.data:
-                files_to_delete = []
-                for memory in memories_with_images.data:
-                    if memory.get("image_url") and "character-images" in memory["image_url"]:
-                        filename = memory["image_url"].split("character-images/")[1]
-                        files_to_delete.append(filename)
-                
-                if files_to_delete:
-                    supabase.storage.from_("character-images").remove(files_to_delete)
-        except Exception as e:
-            print(f"Warning: Could not delete chat images: {str(e)}")
-        
-        # Delete conversation memories
-        supabase.table("memories").delete().eq("character_id", character_id).eq("user_id", user_id).execute()
-        
-        # Delete character
-        delete_result = supabase.table("characters").delete().eq("id", character_id).execute()
-        
-        return {"message": "Character deleted successfully", "deleted_character": character}
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error deleting character: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Character deletion error: {str(e)}")
-
-# --------- Password Reset Functionality ---------
-
-def generate_reset_token(user_id: str) -> str:
-    """Generate a password reset token"""
-    expire = datetime.utcnow() + timedelta(hours=1)  # 1 hour expiry
-    to_encode = {"sub": user_id, "type": "reset", "exp": expire}
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def verify_reset_token(token: str) -> Optional[str]:
-    """Verify reset token and return user_id"""
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        if payload.get("type") != "reset":
-            return None
-        return payload.get("sub")
-    except jwt.ExpiredSignatureError:
-        return None
-    except jwt.JWTError:
-        return None
-
-@app.post("/users/request-password-reset")
-async def request_password_reset(req: PasswordResetRequest):
-    """Request password reset - generates reset token"""
-    try:
-        # Find user by username and email
-        result = supabase.table("users").select("*")\
-            .eq("username", req.username)\
-            .eq("email", req.email)\
-            .execute()
-        
-        if not result.data:
-            # For security, don't reveal if user exists
-            return {"message": "If an account with that username and email exists, a reset link has been sent."}
-        
-        user_data = result.data[0]
-        reset_token = generate_reset_token(str(user_data["id"]))
-        
-        # In a real app, you'd send this via email
-        # For now, we'll return it (remove this in production!)
-        return {
-            "message": "Password reset token generated",
-            "reset_token": reset_token,  # Remove this in production
-            "note": "In production, this would be sent via email"
-        }
-    
-    except Exception as e:
-        print(f"Password reset request error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Password reset request failed")
-
-@app.post("/users/reset-password")
-async def reset_password(req: PasswordUpdateRequest):
-    """Reset password using reset token"""
-    try:
-        # Verify reset token
-        user_id = verify_reset_token(req.reset_token)
-        if not user_id:
-            raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-        
-        # Find user
-        result = supabase.table("users").select("*").eq("id", user_id).execute()
-        if not result.data:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        user_data = result.data[0]
-        
-        # Verify username matches
-        if user_data["username"] != req.username:
-            raise HTTPException(status_code=400, detail="Username mismatch")
-        
-        # Update password
-        new_hashed_password = hash_password(req.new_password)
-        update_result = supabase.table("users").update({
-            "password_hash": new_hashed_password
-        }).eq("id", user_id).execute()
-        
-        if not update_result.data:
-            raise HTTPException(status_code=500, detail="Failed to update password")
-        
-        return {"message": "Password reset successfully"}
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Password reset error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Password reset failed")
-
-# --------- User Profile Management ---------
-
-class UpdateProfileRequest(BaseModel):
-    user_id: str
-    username: Optional[str] = None
-    email: Optional[str] = None
-
-@app.put("/users/{user_id}/profile")
-async def update_user_profile(user_id: str, req: UpdateProfileRequest):
-    """Update user profile information"""
-    try:
-        # Verify user ownership (in real app, verify JWT token matches user_id)
-        if req.user_id != user_id:
-            raise HTTPException(status_code=403, detail="Cannot update another user's profile")
-        
-        update_data = {}
-        if req.username is not None:
-            # Check if new username is available
-            existing = supabase.table("users").select("*").eq("username", req.username).neq("id", user_id).execute()
-            if existing.data:
-                raise HTTPException(status_code=400, detail="Username already taken")
-            update_data["username"] = req.username
-        
-        if req.email is not None:
-            # Check if new email is available
-            existing = supabase.table("users").select("*").eq("email", req.email).neq("id", user_id).execute()
-            if existing.data:
-                raise HTTPException(status_code=400, detail="Email already in use")
-            update_data["email"] = req.email
-        
-        if update_data:
-            result = supabase.table("users").update(update_data).eq("id", user_id).execute()
-            if not result.data:
-                raise HTTPException(status_code=500, detail="Failed to update profile")
-            
-            return {"user": result.data[0], "message": "Profile updated successfully"}
-        else:
-            return {"message": "No changes to update"}
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Profile update error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Profile update failed")
-
-# --------- Enhanced Analytics & Insights ---------
-
-@app.get("/users/{user_id}/stats")
-async def get_user_stats(user_id: str):
-    """Get user statistics and insights"""
-    try:
-        # Get character count
-        chars_result = supabase.table("characters").select("id").eq("user_id", user_id).execute()
-        character_count = len(chars_result.data) if chars_result.data else 0
-        
-        # Get total message count
-        messages_result = supabase.table("memories").select("id").eq("user_id", user_id).execute()
-        total_messages = len(messages_result.data) if messages_result.data else 0
-        
-        # Get images generated count
-        images_result = supabase.table("memories").select("id").eq("user_id", user_id).not_("image_url", "is", None).execute()
-        images_generated = len(images_result.data) if images_result.data else 0
-        
-        # Get most active character
-        if character_count > 0:
-            # Count messages per character
-            all_memories = supabase.table("memories").select("character_id").eq("user_id", user_id).execute()
-            if all_memories.data:
-                char_message_counts = {}
-                for memory in all_memories.data:
-                    char_id = memory["character_id"]
-                    char_message_counts[char_id] = char_message_counts.get(char_id, 0) + 1
-                
-                if char_message_counts:
-                    most_active_char_id = max(char_message_counts, key=char_message_counts.get)
-                    char_result = supabase.table("characters").select("name").eq("id", most_active_char_id).execute()
-                    most_active_character = char_result.data[0]["name"] if char_result.data else "Unknown"
-                else:
-                    most_active_character = None
-            else:
-                most_active_character = None
-        else:
-            most_active_character = None
-        
-        return {
-            "character_count": character_count,
-            "total_messages": total_messages,
-            "images_generated": images_generated,
-            "most_active_character": most_active_character
-        }
-    
-    except Exception as e:
-        print(f"Stats error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to get user stats")
-        
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
